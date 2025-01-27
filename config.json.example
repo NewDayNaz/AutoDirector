@@ -9,7 +9,7 @@
       "list": ["Test Scene 1", "Test Scene 2", "Test Scene 3"],
       "projector_scene": "Projector",
       "wait_min": 3,
-      "wait_max": 7
+      "wait_max": 8
     }
   },
   "scene_interest_api": {
