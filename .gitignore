@@ -32,3 +32,4 @@ _ReSharper*/
 .idea/
 #Nuget packages folder
 packages/
+/config.json
