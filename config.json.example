@@ -8,8 +8,11 @@
     "scenes": {
       "list": ["Test Scene 1", "Test Scene 2", "Test Scene 3"],
       "projector_scene": "Projector",
+      "ptz_scene": "Camera 2",
       "wait_min": 3,
-      "wait_max": 8
+      "wait_max": 8,
+      "wait_min_slow": 5,
+      "wait_max_slow": 12
     }
   },
   "scene_interest_api": {
