@@ -17,9 +17,6 @@ PROJECTOR_SCENE = config["obs"]["scenes"]["projector_scene"]
 
 SLOW_BPM = 110
 
-# Global flag for PTZ camera movement
-ptzCameraMoving = False
-
 async def fetch_scene_interest():
     """Fetch data from SCENE_INTEREST_API."""
     try:
@@ -45,6 +42,20 @@ async def get_bpm():
             return None
     except Exception as e:
         print(f"Error fetching BPM data: {e}")
+        return None
+    
+async def get_ptz_moving():
+    """Fetch PTZ moving data from the web service."""
+    try:
+        response = requests.get(config["ptz_moving_api"]["url"])
+        if response.status_code == 200:
+            data = response.json()
+            return data["moving"]
+        else:
+            print(f"Failed to fetch PTZ moving data: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Error fetching PTZ moving data: {e}")
         return None
 
 async def get_lyrics_shown():
@@ -72,7 +83,7 @@ async def switch_preview_to_program(cl):
     print("Switched preview scene to program scene")
 
 async def main():
-    global ptzCameraMoving
+    ptzCameraMoving = False
     program_scene = None
     program_scene_name = ""
     next_switch_time = 0
@@ -83,6 +94,7 @@ async def main():
     cl = obs.ReqClient(host=config["obs"]["websocket"]["host"], port=config["obs"]["websocket"]["port"], password=config["obs"]["websocket"]["password"], timeout=3)
     print("Connected to OBS WebSocket")
 
+    last_ptz_moving_request_time = 0
     last_bpm_request_time = 0
     last_lyrics_request_time = 0
     last_scene_interest_request_time = 0
@@ -105,6 +117,10 @@ async def main():
                         await set_preview_scene(cl, PROJECTOR_SCENE)
                         await asyncio.sleep(0.1)
                         await switch_preview_to_program(cl)
+                        if bpm < SLOW_BPM:
+                            next_switch_time = current_time + random.uniform(config["obs"]["scenes"]["wait_min_slow"], config["obs"]["scenes"]["wait_max_slow"])
+                        else:
+                            next_switch_time = current_time + random.uniform(config["obs"]["scenes"]["wait_min"], config["obs"]["scenes"]["wait_max"])
                     last_lyrics_shown = lyrics_shown
                 last_lyrics_request_time = current_time
 
@@ -128,12 +144,20 @@ async def main():
                             await set_preview_scene(cl, next_scene)
                             await asyncio.sleep(0.1)
                             await switch_preview_to_program(cl)
-                    
+                            if bpm < SLOW_BPM:
+                                next_switch_time = current_time + random.uniform(config["obs"]["scenes"]["wait_min_slow"], config["obs"]["scenes"]["wait_max_slow"])
+                            else:
+                                next_switch_time = current_time + random.uniform(config["obs"]["scenes"]["wait_min"], config["obs"]["scenes"]["wait_max"])
                             continue
 
                     last_person_in_scene = person_in_current_scene
+                last_scene_interest_request_time = current_time
 
             # If PTZ is moving, switch to another scene
+            if current_time - last_ptz_moving_request_time >= config["ptz_moving_api"]["poll_interval"]:
+                ptzCameraMoving = await get_ptz_moving()
+                last_ptz_moving_request_time = current_time
+                
             if ptzCameraMoving:
                 if program_scene_name == PTZ_SCENE:
                     print(f"Switch from {program_scene_name} because PTZ is moving!")
@@ -150,7 +174,10 @@ async def main():
                     await set_preview_scene(cl, next_preview_scene)
                     await asyncio.sleep(0.1)
                     await switch_preview_to_program(cl)
-
+                    if bpm < SLOW_BPM:
+                        next_switch_time = current_time + random.uniform(config["obs"]["scenes"]["wait_min_slow"], config["obs"]["scenes"]["wait_max_slow"])
+                    else:
+                        next_switch_time = current_time + random.uniform(config["obs"]["scenes"]["wait_min"], config["obs"]["scenes"]["wait_max"])
                     continue
 
             # Fetch BPM data at the configured interval
@@ -200,51 +227,7 @@ async def main():
     finally:
         await cl.disconnect()  # Make sure to disconnect the client when done
 
-
-# --- Web Server Section ---
-
-async def handle_ptz(request):
-    """
-    HTTP POST handler for the root URL. Sets the ptzCameraMoving flag to True,
-    then schedules a reset after 5 seconds.
-    """
-    global ptzCameraMoving
-    ptzCameraMoving = True
-    print("Received request at '/': ptzCameraMoving set to True")
-    # Schedule the flag to be reset after 5 seconds
-    asyncio.create_task(reset_ptz_after_delay())
-    return web.Response(text="PTZ Camera movement started")
-
-async def reset_ptz_after_delay():
-    """Waits 5 seconds and then resets ptzCameraMoving to False."""
-    global ptzCameraMoving
-    await asyncio.sleep(5)
-    ptzCameraMoving = False
-    print("5 seconds elapsed: ptzCameraMoving reset to False")
-
-async def start_web_server():
-    """Starts the aiohttp web server on port 16842."""
-    app = web.Application()
-    app.router.add_post('/', handle_ptz)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 16842)
-    await site.start()
-    print("Web server running on port 16842")
-    # Keep the server running forever.
-    while True:
-        await asyncio.sleep(3600)
-
-
 # --- Main Entrypoint ---
 
-async def main_wrapper():
-    """
-    Run both the main OBS management loop and the web server concurrently.
-    """
-    server_task = asyncio.create_task(start_web_server())
-    main_task = asyncio.create_task(main())
-    await asyncio.gather(server_task, main_task)
-
 if __name__ == "__main__":
-    asyncio.run(main_wrapper())
+    asyncio.run(main())
