@@ -136,6 +136,7 @@ async def main():
             # If PTZ is moving, switch to another scene
             if ptzCameraMoving:
                 if program_scene_name == PTZ_SCENE:
+                    print(f"Switch from {program_scene_name} because PTZ is moving!")
                     if len(scenes_with_people) > 0:
                         if len(scenes_with_people) > 1:
                             next_preview_scene = random.choice([scene for scene in scenes_with_people if scene != program_scene_name])
@@ -204,7 +205,7 @@ async def main():
 
 async def handle_ptz(request):
     """
-    HTTP GET handler for the root URL. Sets the ptzCameraMoving flag to True,
+    HTTP POST handler for the root URL. Sets the ptzCameraMoving flag to True,
     then schedules a reset after 5 seconds.
     """
     global ptzCameraMoving
@@ -224,7 +225,7 @@ async def reset_ptz_after_delay():
 async def start_web_server():
     """Starts the aiohttp web server on port 16842."""
     app = web.Application()
-    app.router.add_get('/', handle_ptz)
+    app.router.add_post('/', handle_ptz)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 16842)
