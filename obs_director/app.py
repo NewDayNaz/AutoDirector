@@ -15,6 +15,8 @@ SCENE_LIST = config["obs"]["scenes"]["list"]
 PTZ_SCENE = config["obs"]["scenes"]["ptz_scene"]
 PROJECTOR_SCENE = config["obs"]["scenes"]["projector_scene"]
 
+SLOW_BPM = 110
+
 # Global flag for PTZ camera movement
 ptzCameraMoving = False
 
@@ -159,7 +161,7 @@ async def main():
 
             # Calculate time per beat
             seconds_per_beat = 60 / bpm
-            if bpm < 100:
+            if bpm < SLOW_BPM:
                 next_switch_time = next_switch_time or current_time + random.uniform(config["obs"]["scenes"]["wait_min_slow"], config["obs"]["scenes"]["wait_max_slow"])
             else:
                 next_switch_time = next_switch_time or current_time + random.uniform(config["obs"]["scenes"]["wait_min"], config["obs"]["scenes"]["wait_max"])
@@ -187,7 +189,7 @@ async def main():
                 await switch_preview_to_program(cl)
         
                 next_preview_scene = None  # Reset for the next switch
-                if bpm < 100:
+                if bpm < SLOW_BPM:
                     next_switch_time = current_time + random.uniform(config["obs"]["scenes"]["wait_min_slow"], config["obs"]["scenes"]["wait_max_slow"])
                 else:
                     next_switch_time = current_time + random.uniform(config["obs"]["scenes"]["wait_min"], config["obs"]["scenes"]["wait_max"])
