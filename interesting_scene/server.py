@@ -54,7 +54,7 @@ def check_current_program_scene():
     global current_scene_name
     current_scene = cl.get_current_program_scene()
     current_scene_name = current_scene.current_program_scene_name
-    # print(f"Processing current program scene: {current_scene.current_program_scene_name}")
+    print(f"Processing current program scene: {current_scene_name}")
     
     response = cl.get_source_screenshot(name=current_scene_name, img_format="jpg", width=1280, height=720, quality=100)
     base64_image = response.image_data.split(',')[1]
@@ -77,7 +77,7 @@ def check_other_scenes():
         if scene_name == cl.get_current_program_scene():
             continue
         
-        # print(f"Processing scene: {scene_name}")
+        print(f"Processing scene: {scene_name}")
         response = cl.get_source_screenshot(name=scene_name, img_format="jpg", width=1280, height=720, quality=100)
         base64_image = response.image_data.split(',')[1]
         # snapshot_filename = os.path.join(snapshot_folder, f"{scene_name}.jpg")
@@ -92,7 +92,7 @@ def check_other_scenes():
         #     print(f"    No person detected in scene: {scene_name}")
         
         # Sleep to prevent overwhelming the OBS WebSocket server
-        time.sleep(1)
+        time.sleep(0.8)
 
 # Flask route to return the current status as JSON
 @app.route('/status', methods=['GET'])
@@ -108,7 +108,7 @@ def run_checks():
         check_current_program_scene()
         check_other_scenes()
         # Sleep to prevent overwhelming the OBS WebSocket server
-        time.sleep(5)  # Adjust the delay as needed
+        time.sleep(2)  # Adjust the delay as needed
 
 # Run the checks in a separate thread
 thread = threading.Thread(target=run_checks)

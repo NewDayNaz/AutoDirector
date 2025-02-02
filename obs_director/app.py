@@ -15,7 +15,7 @@ SCENE_LIST = config["obs"]["scenes"]["list"]
 PTZ_SCENE = config["obs"]["scenes"]["ptz_scene"]
 PROJECTOR_SCENE = config["obs"]["scenes"]["projector_scene"]
 
-SLOW_BPM = 110
+SLOW_BPM = config["obs"]["scenes"]["slow_bpm"]
 
 async def fetch_scene_interest():
     """Fetch data from SCENE_INTEREST_API."""

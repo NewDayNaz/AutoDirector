@@ -71,8 +71,8 @@ def capture_loop():
         # Add image to buffer (rolling buffer automatically discards the oldest image if maxlen is reached)
         image_buffer.append(img)
 
-        # Once the buffer has 5 images, compare the first and last
-        if len(image_buffer) == 5:
+        # Once the buffer has 4 images, compare the first and last
+        if len(image_buffer) == 4:
             # Compare the first image (oldest) with the last image (most recent)
             motion_detected = compare_images(image_buffer[0], image_buffer[-1])
 
@@ -85,7 +85,7 @@ def capture_loop():
                 # print("No significant motion detected, lyrics_shown set to True.")
 
         # Delay between captures (adjust as necessary)
-        time.sleep(1)  # Sleep for 1 second before capturing the next image
+        time.sleep(0.25)  # Sleep for 1 second before capturing the next image
 
 # API endpoint to get the current value of lyrics_shown
 @app.route('/data', methods=['GET'])
