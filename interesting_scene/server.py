@@ -6,21 +6,18 @@ import base64
 import obsws_python as obs
 from PIL import Image
 from io import BytesIO
-import threading
-from flask import Flask, jsonify
+import asyncio
+import websockets
 
+# Load configuration
 config = None
 with open("../config.json", "r") as file:
     config = json.load(file)
 
 SCENE_LIST = config["obs"]["scenes"]["list"]
 
+# Load YOLO model
 model = YOLO("yolo11n.pt")
-
-# Folder where snapshots will be saved
-# snapshot_folder = "snapshots"
-# if not os.path.exists(snapshot_folder):
-#     os.makedirs(snapshot_folder)
 
 # Connect to OBS WebSocket
 cl = obs.ReqClient(host=config["obs"]["websocket"]["host"], port=config["obs"]["websocket"]["port"], password=config["obs"]["websocket"]["password"], timeout=3)
@@ -28,19 +25,29 @@ cl = obs.ReqClient(host=config["obs"]["websocket"]["host"], port=config["obs"]["
 # Global variables
 person_in_current_scene = False
 scenes_with_people = []
+scene_pool_data = {} # Store the scene_pool data
 
-# Flask app setup
-app = Flask(__name__)
+# WebSocket client to update scene_interest data
+async def update_scene_interest(person_in_current_scene, scenes_with_people):
+    async with websockets.connect(config["coordinator"]["client"]) as websocket:
+        message = json.dumps({
+            "action": "update",
+            "topic": "scene_interest",
+            "data": {
+                "person_in_current_scene": person_in_current_scene,
+                "scenes_with_people": scenes_with_people
+            }
+        })
+        await websocket.send(message)
+        print(f"Updated scene_interest: person_in_current_scene={person_in_current_scene}, scenes_with_people={scenes_with_people}")
 
-# Function to decode and save Base64 image
+
+# Function to decode and check if an image has a person
 def image_has_person_in_scene(base64_data):
     img_data = base64.b64decode(base64_data)
     img = Image.open(BytesIO(img_data))
     
     results = model(img)
-    
-    # Save the image with detections
-    # results[0].save(filename)
     
     # Check if any person is detected with confidence above 0.50
     for result in results[0].boxes:
@@ -49,72 +56,86 @@ def image_has_person_in_scene(base64_data):
     return False
 
 # Check the current program scene for a person
-def check_current_program_scene():
-    global person_in_current_scene
-    global current_scene_name
+async def check_current_program_scene():
+    global person_in_current_scene, scenes_with_people, scene_pool_data
     current_scene = cl.get_current_program_scene()
     current_scene_name = current_scene.current_program_scene_name
-    print(f"Processing current program scene: {current_scene_name}")
+    print(f"Processing current program scene from websocket: {current_scene_name}")
     
-    response = cl.get_source_screenshot(name=current_scene_name, img_format="jpg", width=1280, height=720, quality=100)
-    base64_image = response.image_data.split(',')[1]
-    # snapshot_filename = os.path.join(snapshot_folder, f"{current_scene_name}.jpg")
-    
-    if image_has_person_in_scene(base64_image):
-        # print(f"    Person detected in current program scene: {current_scene_name}")
-        person_in_current_scene = True
+    if current_scene_name in scene_pool_data:
+      base64_image = scene_pool_data[current_scene_name]
+      if image_has_person_in_scene(base64_image):
+          person_in_current_scene = True
+      else:
+          person_in_current_scene = False
     else:
-        person_in_current_scene = False
-    #     print(f"    No person detected in current program scene: {current_scene_name}")
+      print(f"ERROR: Could not find {current_scene_name} in scene pool data")
+      person_in_current_scene = False
     
-    # Sleep to prevent overwhelming the OBS WebSocket server
-    time.sleep(1)
+    # Notify WebSocket server of the update
+    await update_scene_interest(person_in_current_scene, scenes_with_people)
+    await asyncio.sleep(0.05)
 
 # Check other scenes for people
-def check_other_scenes():
-    global scenes_with_people
+async def check_other_scenes():
+    global scenes_with_people, scene_pool_data
+    current_scene_name = cl.get_current_program_scene().current_program_scene_name
     for scene_name in SCENE_LIST:
-        if scene_name == cl.get_current_program_scene():
+        if scene_name == current_scene_name:
             continue
         
-        print(f"Processing scene: {scene_name}")
-        response = cl.get_source_screenshot(name=scene_name, img_format="jpg", width=1280, height=720, quality=100)
-        base64_image = response.image_data.split(',')[1]
-        # snapshot_filename = os.path.join(snapshot_folder, f"{scene_name}.jpg")
+        print(f"Processing scene from websocket: {scene_name}")
         
-        if image_has_person_in_scene(base64_image):
-            # print(f"    Person detected in scene: {scene_name}")
-            if scene_name not in scenes_with_people:
-                scenes_with_people.append(scene_name)
+        if scene_name in scene_pool_data:
+          base64_image = scene_pool_data[scene_name]
+          if image_has_person_in_scene(base64_image):
+              if scene_name not in scenes_with_people:
+                  scenes_with_people.append(scene_name)
+          else:
+              if scene_name in scenes_with_people:
+                  scenes_with_people.remove(scene_name)
         else:
-            if scene_name in scenes_with_people:
-                scenes_with_people.remove(scene_name)
-        #     print(f"    No person detected in scene: {scene_name}")
-        
-        # Sleep to prevent overwhelming the OBS WebSocket server
-        time.sleep(0.8)
+          print(f"ERROR: Could not find {scene_name} in scene pool data")
 
-# Flask route to return the current status as JSON
-@app.route('/status', methods=['GET'])
-def get_status():
-    return jsonify({
-        'person_in_current_scene': person_in_current_scene,
-        'scenes_with_people': scenes_with_people
-    })
+        # Notify WebSocket server of the update
+        await update_scene_interest(person_in_current_scene, scenes_with_people)
+        await asyncio.sleep(0.05)
 
 # Function to run the checks and continuously update status
-def run_checks():
+async def run_checks():
+  global scene_pool_data
+  uri = config["coordinator"]["client"]
+  async with websockets.connect(uri, ping_interval=None) as websocket:
+    # Subscribe to the scene_pool topic
+    await websocket.send(json.dumps({"action": "subscribe", "topic": "scene_pool"}))
+
     while True:
-        check_current_program_scene()
-        check_other_scenes()
-        # Sleep to prevent overwhelming the OBS WebSocket server
-        time.sleep(2)  # Adjust the delay as needed
+        await asyncio.sleep(0.1)
+        try:
+            message = await websocket.recv()
+            data = json.loads(message)
+            topic = data.get("topic")
 
-# Run the checks in a separate thread
-thread = threading.Thread(target=run_checks)
-thread.daemon = True
-thread.start()
+            if topic == "scene_pool":
+                scene_name = data["data"]["key"]
+                scene_data = data["data"]["value"]
+                scene_pool_data[scene_name] = scene_data
+                print(f"Updated scene_pool data for {scene_name}")
+                await check_current_program_scene()
+                await check_other_scenes()
+                await asyncio.sleep(0.1)  # Adjust the delay as needed
+        except websockets.exceptions.ConnectionClosedError:
+            print("Websocket connection closed, attempting to reconnect...")
+            break
+        except Exception as e:
+            print(f"An unexpected error has occurred when receiving messages {e}")
+            break
 
-# Start Flask web server
+# Main entry point
+async def main():
+    # Start the checks loop
+    await run_checks()
+
+# Run the script
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=3853)  # Run on all interfaces, port 3853
+    asyncio.run(main())

@@ -9,6 +9,7 @@
       "list": ["Test Scene 1", "Test Scene 2", "Test Scene 3"],
       "projector_scene": "Projector",
       "ptz_scene": "Camera 2",
+      "slow_bpm": 110,
       "wait_min": 3,
       "wait_max": 8,
       "wait_min_slow": 5,
@@ -17,14 +18,18 @@
   },
   "scene_interest_api": {
     "url": "http://localhost:3853/status",
-    "poll_interval": 1
+    "poll_interval": 0.5
   },
   "bpm_api": {
     "url": "http://localhost:3962/bpm",
-    "poll_interval": 5
+    "poll_interval": 3
   },
   "lyrics_api": {
     "url": "http://localhost:4932/data",
-    "poll_interval": 1
+    "poll_interval": 0.5
+  },
+  "ptz_moving_api": {
+    "url": "http://localhost:16842/",
+    "poll_interval": 0.12
   }
 }
