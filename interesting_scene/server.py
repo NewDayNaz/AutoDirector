@@ -103,33 +103,38 @@ async def check_other_scenes():
 
 # Function to run the checks and continuously update status
 async def run_checks():
-  global scene_pool_data
-  uri = config["coordinator"]["client"]
-  async with websockets.connect(uri, ping_interval=None) as websocket:
-    # Subscribe to the scene_pool topic
-    await websocket.send(json.dumps({"action": "subscribe", "topic": "scene_pool"}))
-
+    global scene_pool_data
+    uri = config["coordinator"]["client"]
     while True:
-        await asyncio.sleep(0.1)
-        try:
-            message = await websocket.recv()
-            data = json.loads(message)
-            topic = data.get("topic")
+      try:
+        async with websockets.connect(uri, ping_interval=None) as websocket:
+          # Subscribe to the scene_pool topic
+          await websocket.send(json.dumps({"action": "subscribe", "topic": "scene_pool"}))
 
-            if topic == "scene_pool":
-                scene_name = data["data"]["key"]
-                scene_data = data["data"]["value"]
-                scene_pool_data[scene_name] = scene_data
-                print(f"Updated scene_pool data for {scene_name}")
-                await check_current_program_scene()
-                await check_other_scenes()
-                await asyncio.sleep(0.1)  # Adjust the delay as needed
-        except websockets.exceptions.ConnectionClosedError:
-            print("Websocket connection closed, attempting to reconnect...")
-            break
-        except Exception as e:
-            print(f"An unexpected error has occurred when receiving messages {e}")
-            break
+          while True:
+            await asyncio.sleep(0.1)
+            try:
+              message = await websocket.recv()
+              data = json.loads(message)
+              topic = data.get("topic")
+
+              if topic == "scene_pool":
+                  scene_name = data["data"]["key"]
+                  scene_data = data["data"]["value"]
+                  scene_pool_data[scene_name] = scene_data
+                  print(f"Updated scene_pool data for {scene_name}")
+                  await check_current_program_scene()
+                  await check_other_scenes()
+            except websockets.exceptions.ConnectionClosedError:
+                print("Websocket connection closed, attempting to reconnect...")
+                break
+            except Exception as e:
+              print(f"An unexpected error has occurred when receiving messages {e}, attempting to reconnect...")
+              break
+
+      except Exception as e:
+        print(f"Error connecting to websocket, attempting to reconnect: {e}")
+        await asyncio.sleep(2) # Sleep before reconnecting
 
 # Main entry point
 async def main():
