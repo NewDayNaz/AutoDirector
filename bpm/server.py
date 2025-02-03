@@ -1,9 +1,15 @@
 import sounddevice as sd
 import numpy as np
 import librosa
+import json
 from collections import deque
-from flask import Flask, jsonify
-import threading
+import asyncio
+import websockets
+
+# Load configuration
+config = None
+with open("../config.json", "r") as file:
+    config = json.load(file)
 
 # Parameters
 INPUT_DEVICE = 1
@@ -21,16 +27,16 @@ bpm_history = deque(maxlen=ROLLING_AVERAGE_WINDOW)
 current_bpm = None
 rolling_avg_bpm = None
 
-# Flask app setup
-app = Flask(__name__)
-
-@app.route("/bpm", methods=["GET"])
-def get_bpm():
-    """Return the current and rolling average BPM as JSON."""
-    return jsonify({
-        "current_bpm": current_bpm,
-        "rolling_average_bpm": rolling_avg_bpm
-    })
+# WebSocket client to update BPM value
+async def update_bpm(current_bpm, rolling_avg_bpm):
+    async with websockets.connect(config["coordinator"]["client"]) as websocket:
+        message = json.dumps({
+            "action": "update",
+            "topic": "bpm",
+            "data": rolling_avg_bpm
+        })
+        await websocket.send(message)
+        print(f"Updated BPM: {rolling_avg_bpm}")
 
 # Beat detection function
 def detect_bpm(audio_data, samplerate):
@@ -46,7 +52,7 @@ def audio_callback(indata, frames, time, status):
     audio_buffer.extend(indata[:, 0])
 
 # Function to process audio and update BPM values
-def process_audio_stream():
+async def process_audio_stream():
     global current_bpm, rolling_avg_bpm
     with sd.InputStream(device=INPUT_DEVICE, channels=2, samplerate=SAMPLERATE, callback=audio_callback):
         print("Listening for beats...")
@@ -65,10 +71,17 @@ def process_audio_stream():
                 current_bpm = bpm
                 rolling_avg_bpm = avg_bpm
 
-# Start audio processing in a separate thread
-audio_thread = threading.Thread(target=process_audio_stream, daemon=True)
-audio_thread.start()
+                # Send updated BPM values to the WebSocket server
+                await update_bpm(current_bpm, rolling_avg_bpm)
 
-# Start the Flask web server
+            # Sleep to avoid busy-waiting
+            await asyncio.sleep(0.1)
+
+# Main entry point
+async def main():
+    # Start the audio processing loop
+    await process_audio_stream()
+
+# Run the script
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=3962, debug=False)
+    asyncio.run(main())

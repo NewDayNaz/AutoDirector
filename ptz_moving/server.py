@@ -1,7 +1,22 @@
 import asyncio
-from aiohttp import web  # Make sure aiohttp is installed
+import json
+from aiohttp import web
+import websockets
 
+# Load configuration
+config = None
+with open("../config.json", "r") as file:
+    config = json.load(file)
+
+# Global state for PTZ camera movement
 ptzCameraMoving = False
+
+# WebSocket client to update ptz_moving value
+async def update_ptz_moving(value):
+    async with websockets.connect(config["coordinator"]["client"]) as websocket:
+        message = json.dumps({"action": "update", "topic": "ptz_moving", "data": value})
+        await websocket.send(message)
+        print(f"Updated ptz_moving to {value} on WebSocket server")
 
 # --- Web Server Section ---
 
@@ -12,33 +27,28 @@ async def handle_ptz_post(request):
     """
     global ptzCameraMoving
     ptzCameraMoving = True
-    print("Received POST request at '/': ptzCameraMoving set to True")
+    
+    # Notify WebSocket server of the update
+    await update_ptz_moving(ptzCameraMoving)
+    
     # Schedule the flag to be reset after 5 seconds
     asyncio.create_task(reset_ptz_after_delay())
     return web.Response(text="PTZ Camera movement started")
-
-async def handle_ptz_get(request):
-    """
-    HTTP GET handler for the root URL. Returns the current value of ptzCameraMoving.
-    """
-    global ptzCameraMoving
-    # Return the current value as JSON
-    return web.json_response({"moving": ptzCameraMoving})
 
 async def reset_ptz_after_delay():
     """Waits 5 seconds and then resets ptzCameraMoving to False."""
     global ptzCameraMoving
     await asyncio.sleep(5)
     ptzCameraMoving = False
-    print("5 seconds elapsed: ptzCameraMoving reset to False")
+    
+    # Notify WebSocket server of the update
+    await update_ptz_moving(ptzCameraMoving)
 
 async def start_web_server():
     """Starts the aiohttp web server on port 16842."""
     app = web.Application()
     # Add POST route for triggering the PTZ camera movement.
     app.router.add_post('/', handle_ptz_post)
-    # Add GET route for retrieving the current state of ptzCameraMoving.
-    app.router.add_get('/', handle_ptz_get)
     
     runner = web.AppRunner(app)
     await runner.setup()
@@ -49,5 +59,11 @@ async def start_web_server():
     while True:
         await asyncio.sleep(3600)
 
+# Main entry point
+async def main():
+    # Start the web server
+    await start_web_server()
+
+# Run the script
 if __name__ == "__main__":
-    asyncio.run(start_web_server())
+    asyncio.run(main())
