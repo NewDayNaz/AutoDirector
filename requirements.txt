@@ -1,0 +1,23 @@
+# ATEM multiview ingestion and person detection
+# Python 3.11+ recommended. Install: pip install -r requirements.txt
+# For headless/CI use opencv-python-headless instead of opencv-python.
+
+# Video capture and image processing
+opencv-python>=4.8.0,<5.0
+numpy>=1.24.0,<3.0
+
+# YOLO person detection (atem_director)
+ultralytics>=8.2.0
+
+# ATEM switcher control (atem_control); only beta releases exist on PyPI
+PyATEMMax>=1.0b9
+
+# X32 OSC (adapters/x32)
+python-osc>=1.8.0
+
+# ProPresenter WebSocket (adapters/propresenter)
+websocket-client>=1.6.0
+
+# Web API (web/main.py)
+fastapi>=0.100.0
+uvicorn>=0.22.0

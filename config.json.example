@@ -1,35 +1,84 @@
 {
-  "obs": {
-    "websocket": {
-      "host": "localhost",
-      "port": 4455,
-      "password": "PASSWORD_GOES_HERE"
-    },
-    "scenes": {
-      "list": ["Test Scene 1", "Test Scene 2", "Test Scene 3"],
-      "projector_scene": "Projector",
-      "ptz_scene": "Camera 2",
-      "slow_bpm": 110,
-      "wait_min": 3,
-      "wait_max": 8,
-      "wait_min_slow": 5,
-      "wait_max_slow": 12
+  "atem": {
+    "ip": "192.168.1.240",
+    "use_preview": true,
+    "enabled": true
+  },
+  "capture": {
+    "source": 0,
+    "profile_path": "multiview_profiles/default.json",
+    "inset_ratio": 0.02
+  },
+  "input_roles": {
+    "1": "cg",
+    "2": "ptz",
+    "3": "roamer",
+    "4": "sermon_hero",
+    "5": "fixed_1",
+    "6": "fixed_2",
+    "7": "playback",
+    "8": "bumper"
+  },
+  "phases": {
+    "phase_ids": ["Intro", "BumperIn", "Band1", "Welcome", "Greeting", "Announce", "VersePrayer", "Band2", "PrayerTime", "Band3", "Acoustic", "BumperSermon", "Sermon", "BandOrDismiss", "Outro"],
+    "labels": {
+      "Intro": "Intro (slides + lobby)",
+      "Sermon": "Sermon (20-40 min)",
+      "Outro": "Lobby / end"
     }
   },
-  "scene_interest_api": {
-    "url": "http://localhost:3853/status",
-    "poll_interval": 0.5
+  "phases_locked_to_role": {
+    "Intro": "cg",
+    "BumperIn": "cg",
+    "BumperSermon": "cg",
+    "Outro": "cg"
   },
-  "bpm_api": {
-    "url": "http://localhost:3962/bpm",
-    "poll_interval": 3
+  "propresenter": {
+    "host": "127.0.0.1",
+    "port": 55015,
+    "password": ""
   },
-  "lyrics_api": {
-    "url": "http://localhost:4932/data",
-    "poll_interval": 0.5
+  "playlist_item_to_phase": {
+    "Pre Service Slideshow": "Intro",
+    "Countdown - Pre Service Video": "BumperIn",
+    "Praise The Lord - Gateway": "Band1",
+    "Welcome - Greeting": "Welcome",
+    "Bible Time - Offering": "VersePrayer",
+    "Rest On Us - Full Band": "Band2",
+    "Give Me Jesus - Upperroom": "Acoustic",
+    "Prayer Time": "PrayerTime",
+    "It's Well With My Soul": "Band3",
+    "Sermon": "Sermon",
+    "Goodbye": "Outro"
   },
-  "ptz_moving_api": {
-    "url": "http://localhost:16842/",
-    "poll_interval": 0.12
-  }
+  "x32": {
+    "host": "192.168.1.50",
+    "port": 10023,
+    "band_dca_index": 1,
+    "propresenter_channel": 16
+  },
+  "ptz": {
+    "preset_per_phase": {
+      "Band1": "Stage wide",
+      "Welcome": "Audience wide",
+      "Sermon": "Pastor right/center",
+      "VersePrayer": "Pastor"
+    }
+  },
+  "pacing": {
+    "min_seconds_on_shot": 5,
+    "max_seconds_on_shot": 20,
+    "sermon_min_seconds": 15,
+    "sermon_max_seconds": 45
+  },
+  "transition_duration": 0.25,
+  "backup_input_id": 1,
+  "backup_timeout_seconds": 10,
+  "roamer": {
+    "atem_input_id": 3,
+    "stability_window_seconds": 1.0,
+    "motion_threshold": 10.0
+  },
+  "loop_rate_hz": 10,
+  "dwell_seconds": 0.75
 }
