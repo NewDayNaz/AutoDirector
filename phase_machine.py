@@ -40,10 +40,17 @@ class PhaseMachine:
         self._external_reason: Optional[str] = None
         self._run_sheet_start: Optional[float] = None  # time.monotonic() when run started
         self._run_sheet_durations: Optional[List[float]] = None  # seconds per phase in order
+        # Last source that produced the current phase, for UI/debug (manual/external/propresenter/run_sheet/previous).
+        self._last_source: str = "initial"
 
     @property
     def current_phase(self) -> str:
         return self._current_phase
+
+    @property
+    def phase_source(self) -> str:
+        """Return the last source that set the current phase (for debug/UX)."""
+        return self._last_source
 
     def set_manual_override(self, phase_id: Optional[str]) -> None:
         """Set or clear manual phase override (e.g. from API/UI)."""
@@ -101,6 +108,7 @@ class PhaseMachine:
                 source = "run_sheet"
             # else keep previous
         # else keep previous
+        self._last_source = source
         if self._current_phase != previous:
             extra = ""
             if source == "external_override" and self._external_reason:

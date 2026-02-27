@@ -65,6 +65,7 @@ class ProPresenterAdapter:
         password: Optional[str] = None,
         playlist_item_to_phase: Optional[Dict[str, str]] = None,
         poll_interval_sec: float = 1,
+        unmapped_fallback_phase: Optional[str] = None,
     ):
         if not _WS_AVAILABLE:
             raise ImportError("websocket-client is required for ProPresenter adapter. pip install websocket-client")
@@ -73,6 +74,7 @@ class ProPresenterAdapter:
         self._password: Optional[str] = (password or "").strip() or None
         self.playlist_item_to_phase = playlist_item_to_phase or {}
         self.poll_interval_sec = poll_interval_sec
+        self._unmapped_fallback_phase: Optional[str] = unmapped_fallback_phase
         self._ws: Optional[websocket.WebSocketApp] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -82,6 +84,8 @@ class ProPresenterAdapter:
         self._stage_display_layout_name: Optional[str] = None
         self._slide_index: Optional[int] = None
         self._slide_type: Optional[str] = None  # "video", "image", "text" if available
+        # Slide index -> True when slide has video media action (built from presentation metadata).
+        self._slide_media_is_video: Dict[int, bool] = {}
         self._lock = threading.Lock()
         self._last_connect_attempt = 0.0
         self._backoff_sec = 1.0
@@ -118,6 +122,63 @@ class ProPresenterAdapter:
         if not band_like:
             band_like = ["Band"]
         return band_like
+
+    def _update_slide_media_map_from_presentation(self, pres: Dict[str, Any]) -> None:
+        """
+        Build a map of slide_index -> bool indicating whether that slide has a
+        video media action, based on the full presentation metadata ProPresenter
+        sends in presentationCurrent.
+        """
+        slide_is_video: Dict[int, bool] = {}
+        idx = 0
+        groups = pres.get("presentationSlideGroups") or pres.get("groups") or []
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            slides = group.get("groupSlides") or group.get("slides") or []
+            for slide in slides:
+                is_video = False
+                if isinstance(slide, dict):
+                    actions = slide.get("actions") or []
+                    for action in actions:
+                        if not isinstance(action, dict):
+                            continue
+                        media_name = str(
+                            action.get("actionMediaName")
+                            or action.get("actionMediaTarget")
+                            or ""
+                        ).lower()
+                        media_type = str(
+                            action.get("actionMediaType")
+                            or action.get("actionType")
+                            or ""
+                        ).lower()
+                        if media_type in ("video", "movie"):
+                            is_video = True
+                        elif media_name:
+                            if media_name.endswith(
+                                (
+                                    ".mp4",
+                                    ".mov",
+                                    ".m4v",
+                                    ".avi",
+                                    ".mkv",
+                                    ".mpg",
+                                    ".mpeg",
+                                )
+                            ):
+                                is_video = True
+                        if is_video:
+                            break
+                slide_is_video[idx] = is_video
+                idx += 1
+        self._slide_media_is_video = slide_is_video
+        # Refresh current slide_type from the new map if we already have an index.
+        if self._slide_index is not None:
+            if self._slide_media_is_video.get(self._slide_index):
+                self._slide_type = "video"
+            elif self._slide_type == "video":
+                self._slide_type = None
 
     def _get_or_assign_song_phase(
         self,
@@ -293,6 +354,8 @@ class ProPresenterAdapter:
                 pres = data.get("presentation")
                 if isinstance(pres, dict):
                     raw_name = pres.get("presentationName") or pres.get("name") or raw_name
+                    # Also update per-slide media map from full presentation metadata when available.
+                    self._update_slide_media_map_from_presentation(pres)
 
                 def _valid_item_name(v) -> Optional[str]:
                     if v is None:
@@ -320,8 +383,52 @@ class ProPresenterAdapter:
                 if name:
                     self._current_item_name = name
                 # else leave _current_item_name unchanged (don't overwrite with "0.0" or other junk)
+
+                # Track slide index and attempt to infer slide type (video/image/text) from metadata.
+                prev_index = self._slide_index
                 if "slideIndex" in data:
-                    self._slide_index = int(data["slideIndex"]) if str(data["slideIndex"]).isdigit() else None
+                    idx_raw = data.get("slideIndex")
+                    self._slide_index = int(idx_raw) if idx_raw is not None and str(idx_raw).isdigit() else None
+                    index_changed = self._slide_index is not None and self._slide_index != prev_index
+                else:
+                    index_changed = False
+
+                # Prefer explicit per-slide media map (video vs non-video) when available.
+                slide_type: Optional[str] = None
+                if self._slide_index is not None and self._slide_media_is_video.get(self._slide_index):
+                    slide_type = "video"
+
+                # Infer slide type from known ProPresenter fields when available.
+                candidates = ("slideType", "presentationSlideType", "type", "mediaType")
+                if slide_type is None:
+                    for key in candidates:
+                        value = data.get(key)
+                        if isinstance(value, str) and value.strip():
+                            slide_type = value.strip().lower()
+                            break
+                # Some responses may nest slide metadata under a \"slide\" or \"presentation\" object.
+                if slide_type is None:
+                    slide_obj = data.get("slide") or data.get("presentation")
+                    if isinstance(slide_obj, dict):
+                        for key in candidates:
+                            value = slide_obj.get(key)
+                            if isinstance(value, str) and value.strip():
+                                slide_type = value.strip().lower()
+                                break
+                # Fallback: infer from path extension when the current presentation path looks like media.
+                if slide_type is None and self._current_presentation_path:
+                    path_lower = str(self._current_presentation_path).lower()
+                    if path_lower.endswith((".mp4", ".mov", ".m4v", ".avi", ".mkv", ".mpg", ".mpeg")):
+                        slide_type = "video"
+                    elif path_lower.endswith((".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".webp")):
+                        slide_type = "image"
+
+                if slide_type is not None:
+                    self._slide_type = slide_type
+                elif index_changed:
+                    # When the slide index changes and no type is provided, clear stale type.
+                    self._slide_type = None
+
                 # Log when playlist item changes (for debugging phase detection)
                 if self._current_item_name != prev_name:
                     phase = self.playlist_item_to_phase.get(self._current_item_name)
@@ -353,8 +460,17 @@ class ProPresenterAdapter:
             return
         if action in ("presentationSlideIndex", "presentationSlideIndex__sub"):
             with self._lock:
+                prev_index = self._slide_index
                 idx = data.get("slideIndex")
                 self._slide_index = int(idx) if idx is not None and str(idx).isdigit() else None
+                # When ProPresenter only sends a slide index update without metadata,
+                # derive slide_type from our per-slide media map (video vs non-video)
+                # and clear any stale type when moving to a non-video slide.
+                if self._slide_index is not None and self._slide_index != prev_index:
+                    if self._slide_media_is_video.get(self._slide_index):
+                        self._slide_type = "video"
+                    else:
+                        self._slide_type = None
             return
         if action in ("stageDisplaySets", "stageDisplaySets__sub", "stageDisplayChangeLayout", "stageDisplayChangeLayout__sub"):
             with self._lock:
@@ -466,6 +582,16 @@ class ProPresenterAdapter:
         auto_phase = self._get_or_assign_song_phase(name, stage_layout_name)
         if auto_phase:
             return auto_phase
+        # Final fallback: optional configured phase for any remaining unmapped items.
+        if self._unmapped_fallback_phase:
+            try:
+                from config.schema import PHASE_IDS  # type: ignore
+
+                if self._unmapped_fallback_phase in PHASE_IDS:
+                    return self._unmapped_fallback_phase
+            except Exception:
+                # If schema import fails for any reason, still return the configured fallback.
+                return self._unmapped_fallback_phase
         return None
 
     def get_current_item_name(self) -> Optional[str]:

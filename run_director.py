@@ -24,14 +24,13 @@ if str(_ATEM_ROOT) not in sys.path:
     sys.path.insert(0, str(_ATEM_ROOT))
 
 from config.load import load_config_path
-from config.schema import DirectorConfig
+from config.schema import DirectorConfig, validate_config
 from director_core import DirectorCore, RUN_MODE_RUNNING, RUN_MODE_STOPPED
 from atem_control import ATEMController, ATEMControllerStub
 from phase_machine import PhaseMachine
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     parser = argparse.ArgumentParser(description="Run Church Auto-Director")
     parser.add_argument("--config", "-c", default="config.json", help="Path to config JSON")
     parser.add_argument("--web", action="store_true", help="Start web API for control/debug")
@@ -48,6 +47,17 @@ def main():
         config = load_config_path(config_path)
     except Exception as e:
         print(f"Invalid config: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Apply configured log level and validate config before starting anything.
+    log_level_name = getattr(config, "log_level", "INFO")
+    log_level = getattr(logging, str(log_level_name).upper(), logging.INFO)
+    logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    errors = validate_config(config)
+    if errors:
+        logging.error("Config validation failed:")
+        for err in errors:
+            logging.error("  - %s", err)
         sys.exit(1)
 
     # Ingest and detector (optional: if capture source not available, director still runs with no CV)
@@ -91,6 +101,7 @@ def main():
             port=config.propresenter.port,
             password=config.propresenter.password,
             playlist_item_to_phase=config.playlist_item_to_phase,
+            unmapped_fallback_phase=getattr(config, "unmapped_playlist_item_fallback_phase", None),
         )
         pp.start()
         # Log initial playlist → phase mapping (explicit config + any auto-assigned song phases).

@@ -88,14 +88,34 @@ class InputRolesConfig:
 
 
 @dataclass
+class PhaseRuleConfig:
+    """
+    Optional per-phase rule overrides.
+    - dwell_seconds: override global DirectorConfig.dwell_seconds for this phase.
+    - min_seconds_on_shot: override PacingConfig.min_seconds_on_shot / sermon_min_seconds.
+    - allowed_roles: if set, restrict eligible inputs to these roles only.
+    - rotate: when true, rotate through eligible inputs instead of always picking the first.
+    """
+    dwell_seconds: Optional[float] = None
+    min_seconds_on_shot: Optional[float] = None
+    allowed_roles: List[str] = field(default_factory=list)
+    rotate: bool = False
+
+
+@dataclass
 class PhaseConfig:
-    """Phase list with optional labels (for UI)."""
+    """Phase list with optional labels (for UI) and per-phase rule overrides."""
     phase_ids: List[str] = field(default_factory=lambda: list(PHASE_IDS))
     # Optional label per phase for display
     labels: Dict[str, str] = field(default_factory=dict)
+    # Optional per-phase rule overrides keyed by phase id.
+    rules: Dict[str, PhaseRuleConfig] = field(default_factory=dict)
 
     def label_for(self, phase_id: str) -> str:
         return self.labels.get(phase_id, phase_id)
+
+    def rule_for(self, phase_id: str) -> Optional[PhaseRuleConfig]:
+        return self.rules.get(phase_id)
 
 
 @dataclass
@@ -145,6 +165,25 @@ class PacingConfig:
 
 
 @dataclass
+class AudioBiasConfig:
+    """
+    Optional audio-driven biasing between band and speaking.
+    Used to hint candidate selection based on X32 and ProPresenter signals.
+    """
+    enabled: bool = True
+    # Minimum ProPresenter channel level (0–1) to consider visuals/lyrics \"up\" for band.
+    band_threshold: float = 0.3
+    # Lower threshold used when inferring speaking from low but present content.
+    speaking_threshold: float = 0.1
+    # When true, use ProPresenter stage display layout name as an additional hint
+    # (e.g. layouts containing \"LYRICS\" or \"WORSHIP\" imply band; \"TEACH\"/\"LIVE\" imply speaking).
+    use_stage_layout: bool = True
+    # Require a new inferred audio mode (band/speaking/neutral) to be stable this long
+    # before adopting it, to avoid rapid toggling.
+    hysteresis_seconds: float = 1.5
+
+
+@dataclass
 class RoamerConfig:
     """Roamer input and stability detection."""
     atem_input_id: int = 0  # 0 = roamer not in use
@@ -172,20 +211,37 @@ class DirectorConfig:
     phases: PhaseConfig = field(default_factory=PhaseConfig)
     # ProPresenter playlist item name (or index as string) -> phase id
     playlist_item_to_phase: Dict[str, str] = field(default_factory=dict)
+    # Optional fallback phase id used when a ProPresenter playlist item is not
+    # mapped in playlist_item_to_phase or via automatic song → band-phase mapping.
+    unmapped_playlist_item_fallback_phase: Optional[str] = None
     # Phase lock: phase_id -> input role name; director stays on that role's input only (e.g. Intro/BumperIn/Outro -> cg)
     phases_locked_to_role: Dict[str, str] = field(default_factory=dict)
     propresenter: ProPresenterConfig = field(default_factory=ProPresenterConfig)
     x32: Optional[X32Config] = None
     ptz: Optional[PTZConfig] = None
     pacing: PacingConfig = field(default_factory=PacingConfig)
+    # Optional audio-driven bias between band vs speaking dominance.
+    audio_bias: AudioBiasConfig = field(default_factory=AudioBiasConfig)
     transition_duration: float = 0.25  # 0.25 or 0.5 seconds (fade/mix)
     backup_input_id: int = 1  # Last-resort input (e.g. CG)
     backup_timeout_seconds: float = 10.0
+    # Panic: configured safe shot for emergency cut/lock.
+    panic_safe_input_id: int = 1
+    panic_label: Optional[str] = None
+    # Lock-to-input emergency mode: default timeout before auto-clear (seconds).
+    # 0 or negative means \"no timeout\".
+    lock_to_input_timeout_seconds: float = 30.0
     roamer: RoamerConfig = field(default_factory=RoamerConfig)
     loop_rate_hz: float = 10.0  # 5–15 typical
     run_sheet: Optional[RunSheetConfig] = None
     # Dwell: require "best" input to be stable this long before cutting (seconds)
     dwell_seconds: float = 0.75
+    # Optional list of dotted paths to candidate plugins (see rules_plugins.load_candidate_plugins).
+    rules_plugins: List[str] = field(default_factory=list)
+    # Optional log level for root logger (e.g. INFO, DEBUG); applied at startup.
+    log_level: str = "INFO"
+    # Maximum number of recent decision-log entries to retain in memory/UI.
+    decision_log_max_entries: int = 100
 
 
 def _coerce_input_roles(raw: Any) -> InputRolesConfig:
@@ -233,4 +289,23 @@ def validate_config(cfg: DirectorConfig) -> List[str]:
         errors.append("pacing: invalid min/max seconds on shot")
     if cfg.roamer.enabled and cfg.roamer.stability_window_seconds <= 0:
         errors.append("roamer.stability_window_seconds must be positive")
+    fallback_phase = getattr(cfg, "unmapped_playlist_item_fallback_phase", None)
+    if fallback_phase:
+        if fallback_phase not in cfg.phases.phase_ids:
+            errors.append(
+                f"unmapped_playlist_item_fallback_phase must be one of phases.phase_ids (got {fallback_phase!r})"
+            )
+    if cfg.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+        errors.append(f"log_level must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL (got {cfg.log_level!r})")
+    if cfg.panic_safe_input_id < 1:
+        errors.append("panic_safe_input_id must be >= 1")
+    if cfg.lock_to_input_timeout_seconds < 0:
+        errors.append("lock_to_input_timeout_seconds must be >= 0")
+    if cfg.decision_log_max_entries <= 0:
+        errors.append("decision_log_max_entries must be >= 1")
+    # Audio bias sanity checks (non-fatal if misconfigured, but help catch obvious issues).
+    if cfg.audio_bias.band_threshold < 0 or cfg.audio_bias.speaking_threshold < 0:
+        errors.append("audio_bias.band_threshold and audio_bias.speaking_threshold must be >= 0")
+    if cfg.audio_bias.hysteresis_seconds < 0:
+        errors.append("audio_bias.hysteresis_seconds must be >= 0")
     return errors

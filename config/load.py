@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 
 from .schema import (
     ATEMConfig,
+    AudioBiasConfig,
     CaptureConfig,
     DirectorConfig,
     InputRolesConfig,
@@ -93,10 +94,25 @@ def _load_phases(raw: Any) -> PhaseConfig:
         return raw
     phase_ids = list(PHASE_IDS)
     labels: Dict[str, str] = {}
+    rules: Dict[str, Any] = {}
     if isinstance(raw, dict):
         phase_ids = raw.get("phase_ids", phase_ids)
         labels = raw.get("labels") or {}
-    return PhaseConfig(phase_ids=phase_ids, labels=labels)
+        rules = raw.get("rules") or {}
+    phase_rules: Dict[str, "PhaseRuleConfig"] = {}
+    if isinstance(rules, dict):
+        from .schema import PhaseRuleConfig  # local import to avoid cycles
+
+        for key, value in rules.items():
+            if not isinstance(value, dict):
+                continue
+            phase_rules[str(key)] = PhaseRuleConfig(
+                dwell_seconds=value.get("dwell_seconds"),
+                min_seconds_on_shot=value.get("min_seconds_on_shot"),
+                allowed_roles=list(value.get("allowed_roles", []) or []),
+                rotate=bool(value.get("rotate", False)),
+            )
+    return PhaseConfig(phase_ids=phase_ids, labels=labels, rules=phase_rules)
 
 
 def _load_x32(raw: Any) -> Optional[X32Config]:
@@ -160,6 +176,20 @@ def _load_pacing(raw: Any) -> PacingConfig:
     )
 
 
+def _load_audio_bias(raw: Any) -> AudioBiasConfig:
+    if isinstance(raw, AudioBiasConfig):
+        return raw
+    if not isinstance(raw, dict):
+        return AudioBiasConfig()
+    return AudioBiasConfig(
+        enabled=bool(raw.get("enabled", True)),
+        band_threshold=float(raw.get("band_threshold", 0.3)),
+        speaking_threshold=float(raw.get("speaking_threshold", 0.1)),
+        use_stage_layout=bool(raw.get("use_stage_layout", True)),
+        hysteresis_seconds=float(raw.get("hysteresis_seconds", 1.5)),
+    )
+
+
 def _load_roamer(raw: Any) -> RoamerConfig:
     if isinstance(raw, RoamerConfig):
         return raw
@@ -187,6 +217,9 @@ def _load_run_sheet(raw: Any) -> Optional[RunSheetConfig]:
 
 def load_config(data: Dict[str, Any]) -> DirectorConfig:
     """Build DirectorConfig from a parsed dict (e.g. from JSON)."""
+    raw_fallback_phase = _get(data, "unmapped_playlist_item_fallback_phase", None)
+    fallback_phase = str(raw_fallback_phase) if raw_fallback_phase is not None else None
+    panic_safe_input_default = int(_get(data, "panic_safe_input_id", _get(data, "backup_input_id", 1)))
     return DirectorConfig(
         atem=_load_atem(_get(data, "atem", {})),
         capture=_load_capture(_get(data, "capture", {})),
@@ -202,18 +235,31 @@ def load_config(data: Dict[str, Any]) -> DirectorConfig:
         x32=_load_x32(_get(data, "x32")) or (_load_x32(_get(data, "X32"))),
         ptz=_load_ptz(_get(data, "ptz")) or (_load_ptz(_get(data, "PTZ"))),
         pacing=_load_pacing(_get(data, "pacing", {})),
+        audio_bias=_load_audio_bias(_get(data, "audio_bias", {})),
+        unmapped_playlist_item_fallback_phase=fallback_phase,
         transition_duration=float(_get(data, "transition_duration", 0.25)),
         backup_input_id=int(_get(data, "backup_input_id", 1)),
         backup_timeout_seconds=float(_get(data, "backup_timeout_seconds", 10.0)),
+        panic_safe_input_id=panic_safe_input_default,
+        panic_label=_get(data, "panic_label"),
+        lock_to_input_timeout_seconds=float(_get(data, "lock_to_input_timeout_seconds", 30.0)),
         roamer=_load_roamer(_get(data, "roamer", {})),
         loop_rate_hz=float(_get(data, "loop_rate_hz", 10.0)),
         run_sheet=_load_run_sheet(_get(data, "run_sheet")),
         dwell_seconds=float(_get(data, "dwell_seconds", 0.75)),
+        # rules_plugins and log_level are left to their dataclass defaults unless explicitly provided.
+        rules_plugins=list(_get(data, "rules_plugins", [])),
+        log_level=str(_get(data, "log_level", "INFO")),
+        decision_log_max_entries=int(_get(data, "decision_log_max_entries", 100)),
     )
 
 
 def load_config_path(path: str | Path) -> DirectorConfig:
-    """Load config from a JSON file. Raises on file error or invalid JSON."""
+    """Load config from a JSON file (optionally with a local override).
+
+    If a sibling file with suffix `.local.json` exists (e.g. config.local.json),
+    its keys are shallow-merged into the base JSON before building DirectorConfig.
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
@@ -221,6 +267,13 @@ def load_config_path(path: str | Path) -> DirectorConfig:
         data = json.load(f)
     if not isinstance(data, dict):
         raise ValueError("Config JSON must be an object")
+    # Optional local override: same name with `.local.json` suffix.
+    local_path = path.with_name(path.stem + ".local.json")
+    if local_path.exists():
+        with open(local_path, "r", encoding="utf-8") as f:
+            local = json.load(f)
+        if isinstance(local, dict):
+            data.update(local)
     return load_config(data)
 
 
