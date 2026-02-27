@@ -20,7 +20,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,87 @@ class ProPresenterAdapter:
         self._keepalive_interval_sec = 25.0
         self._last_keepalive = 0.0
         self._last_poll_send = 0.0  # throttle: only send state requests at most every poll_interval_sec
+
+        # Automatic song → band-phase mapping: playlist item name -> phase id
+        self._auto_song_phase: Dict[str, str] = {}
+        self._song_phase_sequence: List[str] = self._build_song_phase_sequence()
+
+    def _build_song_phase_sequence(self) -> List[str]:
+        """
+        Build ordered list of "band-like" phases to use for automatic song mapping,
+        based on the canonical PHASE_IDS from config.schema when available.
+        """
+        try:
+            # Local import to avoid any import-time cycles
+            from config.schema import PHASE_IDS  # type: ignore
+
+            phase_ids = list(PHASE_IDS)
+        except Exception:
+            phase_ids = []
+
+        band_like = [
+            p
+            for p in phase_ids
+            if p.startswith("Band")
+        ]
+        # Fallback sequence if schema import fails or there are no matching phases
+        if not band_like:
+            band_like = ["Band"]
+        return band_like
+
+    def _get_or_assign_song_phase(
+        self,
+        name: str,
+        stage_layout_name: Optional[str],
+    ) -> Optional[str]:
+        """
+        For a playlist item name that is not explicitly mapped in playlist_item_to_phase,
+        assign it to the next "band-like" phase in order (Band1, Band2, Band3, Acoustic, …),
+        using the order of appearance in the playlist as seen from ProPresenter.
+        """
+        # Respect explicit config: if the item is configured, it is not auto-mapped.
+        if name in self.playlist_item_to_phase:
+            return None
+
+        # Already auto-assigned for this service.
+        if name in self._auto_song_phase:
+            return self._auto_song_phase[name]
+
+        # Optional heuristic: only auto-map when the stage display layout looks like lyrics.
+        if stage_layout_name:
+            layout_upper = stage_layout_name.upper()
+            if "LYRICS" not in layout_upper:
+                return None
+
+        if not self._song_phase_sequence:
+            return None
+
+        # Nth distinct song item -> Nth band phase, clamped to the last if there are extra songs.
+        idx = len(self._auto_song_phase)
+        if idx >= len(self._song_phase_sequence):
+            phase = self._song_phase_sequence[-1]
+        else:
+            phase = self._song_phase_sequence[idx]
+
+        self._auto_song_phase[name] = phase
+        return phase
+
+    def log_playlist_mapping_snapshot(self) -> None:
+        """
+        Log a one-time snapshot of the playlist item → phase mapping
+        (explicit config plus any auto-assigned song phases).
+        """
+        with self._lock:
+            explicit = dict(self.playlist_item_to_phase)
+            auto = dict(self._auto_song_phase)
+        combined: Dict[str, str] = {}
+        combined.update(explicit)
+        combined.update(auto)
+        if not combined:
+            logger.info("ProPresenter playlist_item_to_phase: (no playlist mapping configured)")
+            return
+        mapping_str = ", ".join(f"{k!r} -> {v}" for k, v in sorted(combined.items()))
+        logger.info("ProPresenter playlist → phase mapping (explicit + auto): %s", mapping_str)
 
     def start(self) -> bool:
         """Start WebSocket connection and receive thread. Returns True if connect initiated."""
@@ -249,6 +330,14 @@ class ProPresenterAdapter:
                             if key in self._current_item_name or self._current_item_name in key:
                                 phase = value
                                 break
+                    # If still unmapped, attempt automatic song → band-phase mapping.
+                    if not phase and self._current_item_name:
+                        auto_phase = self._get_or_assign_song_phase(
+                            self._current_item_name,
+                            self._stage_display_layout_name,
+                        )
+                        if auto_phase:
+                            phase = auto_phase
                     logger.info(
                         "ProPresenter playlist item: %s -> phase %s",
                         self._current_item_name or "(none)",
@@ -362,6 +451,7 @@ class ProPresenterAdapter:
         """Map current playlist item to phase id using playlist_item_to_phase. None if unknown."""
         with self._lock:
             name = self._current_item_name
+            stage_layout_name = self._stage_display_layout_name
         if not name:
             return None
         # Exact match first
@@ -372,6 +462,10 @@ class ProPresenterAdapter:
         for key, value in self.playlist_item_to_phase.items():
             if key in name or name in key:
                 return value
+        # Automatic song → band-phase mapping for unmapped items, in playlist order.
+        auto_phase = self._get_or_assign_song_phase(name, stage_layout_name)
+        if auto_phase:
+            return auto_phase
         return None
 
     def get_current_item_name(self) -> Optional[str]:

@@ -22,12 +22,13 @@ def is_black_or_frozen(
     black_mean_threshold: float = 5.0,
     black_ratio_threshold: float = 0.98,
     freeze_variance_threshold: float = 1.0,
+    freeze_mean_threshold: float = 1.0,
     prev_frame: Optional[np.ndarray] = None,
 ) -> Tuple[bool, str]:
     """
     Return (is_bad, reason). True if frame appears black or frozen.
     - Black: mean level below black_mean_threshold or ratio of dark pixels > black_ratio_threshold.
-    - Frozen: if prev_frame given, variance of frame difference below freeze_variance_threshold.
+    - Frozen: if prev_frame given, both variance and mean of frame difference are below thresholds.
     """
     if frame is None or frame.size == 0:
         return True, "empty"
@@ -43,7 +44,15 @@ def is_black_or_frozen(
         return True, "black"
     if prev_frame is not None and prev_frame.shape == gray.shape:
         diff = np.abs(gray.astype(float) - prev_frame.astype(float))
-        if np.var(diff) < freeze_variance_threshold:
+        diff_var = float(np.var(diff))
+        diff_mean = float(np.mean(diff))
+        # Treat frame as frozen when it changes very little over time:
+        # both the spread (variance) and overall level (mean) of differences
+        # are below small thresholds. This will classify static color bars
+        # (nearly pixel-perfect identical frames) as frozen, while still
+        # allowing low-motion real video (with sensor noise and micro-motion)
+        # to pass as non-frozen.
+        if diff_var < freeze_variance_threshold and diff_mean < freeze_mean_threshold:
             return True, "frozen"
     return False, ""
 

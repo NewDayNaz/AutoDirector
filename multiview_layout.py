@@ -138,15 +138,69 @@ def detect_layout_auto(
     min_cells: int = 2,
 ) -> Optional[Dict[int, Tuple[int, int, int, int]]]:
     """
-    Automatically detect multiview grid from one frame using line detection.
+    Automatically detect multiview grid from one frame.
+    Prefers line-based detection, but falls back to a uniform grid for common
+    ATEM-style multiview layouts (2x2, 2x4, 2x5, 4x4) when line detection is
+    noisy or incomplete (e.g. thin borders, heavy overlays).
+
     Returns input_id -> (x, y, w, h) for each cell, or None if detection fails.
     """
     h, w = frame.shape[:2]
+
+    # 1) Primary: line-based grid detection
     hy, vx = detect_grid_lines(frame)
     rects = grid_lines_to_rectangles(hy, vx, h, w)
-    if not (min_cells <= len(rects) <= max_cells):
+    if min_cells <= len(rects) <= max_cells:
+        return {i + 1: r for i, r in enumerate(rects)}
+
+    # 2) Fallback: uniform grid based on aspect ratio
+    #
+    # This matches the simple aspect-ratio logic used by ATEMMultiviewDetector
+    # so that common ATEM multiview layouts are still segmented correctly even
+    # when line detection fails (e.g. the Constellation-style 4x4 layout shown
+    # in debug/frame.png).
+    aspect = w / float(h) if h > 0 else 0.0
+
+    grid_rows: Optional[int] = None
+    grid_cols: Optional[int] = None
+
+    if 1.8 < aspect < 2.2:
+        # ~2:1 → ATEM Mini Pro style 2x4 grid
+        grid_rows, grid_cols = 2, 4
+    elif 2.4 < aspect < 2.6:
+        # ~2.5:1 → ATEM 1 M/E style 2x5 grid
+        grid_rows, grid_cols = 2, 5
+    elif 1.6 <= aspect <= 1.95 and w >= 1400:
+        # 16:9-ish and wide → Constellation-style 4x4 multiview
+        grid_rows, grid_cols = 4, 4
+    else:
+        # Default to a simple 2x2 grid for small/unknown layouts
+        grid_rows, grid_cols = 2, 2
+
+    total_cells = grid_rows * grid_cols
+    if not (min_cells <= total_cells <= max_cells):
+        # If caller requested a very tight cell range that excludes this grid,
+        # respect it and fail rather than surprising them.
         return None
-    return {i + 1: r for i, r in enumerate(rects)}
+
+    cell_w = w // grid_cols if grid_cols > 0 else 0
+    cell_h = h // grid_rows if grid_rows > 0 else 0
+    if cell_w <= 0 or cell_h <= 0:
+        return None
+
+    layout: Dict[int, Tuple[int, int, int, int]] = {}
+    idx = 1
+    for row in range(grid_rows):
+        y = row * cell_h
+        # Last row/col take the remainder pixels so we fully cover the frame
+        h_cell = cell_h if row < grid_rows - 1 else h - y
+        for col in range(grid_cols):
+            x = col * cell_w
+            w_cell = cell_w if col < grid_cols - 1 else w - x
+            layout[idx] = (x, y, w_cell, h_cell)
+            idx += 1
+
+    return layout if layout else None
 
 
 def apply_inset(

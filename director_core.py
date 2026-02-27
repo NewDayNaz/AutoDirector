@@ -90,6 +90,8 @@ class DirectorCore:
         self._prev_program_frame: Optional[Any] = None
         # Decision state for UI: signals and outcome of last tick (updated each tick())
         self._decision_state: Dict[str, Any] = {}
+        # Inputs recently detected as "bad" while on program (for recovery suppression)
+        self._recent_bad_inputs: Dict[int, float] = {}
         # Wire phase change -> PTZ recall (except in rehearsal)
         self._phase_machine.on_phase_changed = self._on_phase_changed
 
@@ -106,6 +108,45 @@ class DirectorCore:
             preset = self._ptz.get_preset_for_phase(current)
             if preset:
                 self._ptz.recall_preset(preset)
+
+    def _mark_input_bad(self, input_id: Optional[int]) -> None:
+        """Remember that an input was recently bad while on program."""
+        if input_id is None:
+            return
+        try:
+            if int(input_id) <= 0:
+                return
+        except (TypeError, ValueError):
+            return
+        self._recent_bad_inputs[int(input_id)] = time.monotonic()
+
+    def _is_recently_bad(self, input_id: int) -> bool:
+        """
+        True if this input was recently detected as bad while on program.
+        Entries expire automatically after a short window so inputs can recover.
+        """
+        ts = self._recent_bad_inputs.get(input_id)
+        if ts is None:
+            return False
+        # Allow recovery after roughly half of backup_timeout_seconds, minimum 2s.
+        ttl = max(2.0, self.config.backup_timeout_seconds / 2.0)
+        now = time.monotonic()
+        if now - ts > ttl:
+            # Expired; drop from cache.
+            del self._recent_bad_inputs[input_id]
+            return False
+        return True
+
+    def _can_cut_now(self, now: Optional[float] = None) -> bool:
+        """
+        Global rate limiter for cuts/fades: allow at most one transition
+        within the configured dwell_seconds window.
+        """
+        if now is None:
+            now = time.monotonic()
+        if self._last_cut_time <= 0:
+            return True
+        return (now - self._last_cut_time) >= self.config.dwell_seconds
 
     def set_run_mode(self, mode: str):
         if mode in (RUN_MODE_RUNNING, RUN_MODE_PAUSED, RUN_MODE_REHEARSAL, RUN_MODE_MANUAL, RUN_MODE_STOPPED):
@@ -179,32 +220,106 @@ class DirectorCore:
         band_muted = self._x32.is_band_muted() if self._x32 else None
         pp_level = self._x32.get_propresenter_level() if self._x32 else 0.0
         program_input = self._atem.get_program_input()
+        roles = cfg.input_roles
+        # Treat a cut as "in transition" for at least transition_duration so we don't
+        # immediately trigger another recovery while the switcher is still fading.
+        transition_in_progress = (
+            self._last_cut_time > 0
+            and (now - self._last_cut_time) < cfg.transition_duration
+        )
 
-        # 5) Recovery: if current program is bad, cut away immediately
+        # 5) Recovery: if current program is bad, cut away immediately (unless in transition).
+        # Prefer a "safe" (non-black) recovery camera that is not the current program;
+        # if none are found, fall back to the configured backup input.
         program_segment = None
         for input_id, crop in segments:
             if input_id == program_input:
                 program_segment = crop
                 break
-        if program_segment is not None:
+        program_role = roles.role_for_input(program_input) if program_input is not None else None
+        # Never treat CG program as "bad" via black/freeze detection; CG may intentionally
+        # go to black or static and should not trigger emergency recovery.
+        if program_segment is not None and not transition_in_progress and program_role != "cg":
             is_bad, reason = is_black_or_frozen(
                 program_segment,
                 prev_frame=self._prev_program_frame,
             )
             if is_bad:
-                next_best, eligible = self._choose_candidate(
-                    phase, segments, inputs_with_people, roamer_stable, band_muted, pp_level, program_input,
+                # Remember that this input was bad while on program so we don't
+                # immediately select it again as a "safe" recovery target.
+                self._mark_input_bad(program_input)
+
+                # Scan all segments to find safe (non-black) inputs other than the current
+                # program and any that were recently detected as bad.
+                segment_ids = [i for i, _ in segments]
+                safe_inputs: List[int] = []
+                # input_id -> "safe" | "black" | "recently_bad" | "program" | "cg"
+                safe_why: Dict[int, str] = {}
+                for input_id, crop in segments:
+                    if input_id == program_input:
+                        safe_why[input_id] = "program"
+                        continue
+                    role = roles.role_for_input(input_id)
+                    # Never run black/freeze heuristics on CG; treat it as eligible-safe here
+                    # and let phase rules decide when to use it.
+                    if role == "cg":
+                        safe_why[input_id] = "cg"
+                        safe_inputs.append(input_id)
+                        continue
+                    if self._is_recently_bad(input_id):
+                        safe_why[input_id] = "recently_bad"
+                        continue
+                    other_bad, bad_reason = is_black_or_frozen(crop)
+                    if other_bad:
+                        safe_why[input_id] = f"bad({bad_reason})"
+                        continue
+                    safe_why[input_id] = "safe"
+                    safe_inputs.append(input_id)
+
+                logger.debug(
+                    "Recovery rubric: program=%s phase=%s segment_ids=%s safe_why=%s safe_inputs=%s",
+                    program_input, phase, segment_ids, safe_why, safe_inputs,
                 )
-                target = next_best or cfg.backup_input_id
+
+                if safe_inputs:
+                    # Restrict candidate selection to safe inputs only.
+                    safe_segments = [(i, c) for i, c in segments if i in safe_inputs]
+                    next_best, eligible = self._choose_candidate(
+                        phase, safe_segments, inputs_with_people, roamer_stable, band_muted, pp_level, program_input,
+                        _recovery_context="safe_only",
+                    )
+                    # Ensure we don't recover to a bad or unknown input; if candidate is not
+                    # in the safe set, fall back to the first safe input.
+                    if next_best not in safe_inputs:
+                        next_best = safe_inputs[0]
+                    target = next_best
+                    target_reason = "first_safe" if next_best == safe_inputs[0] else "chosen_from_eligible"
+                else:
+                    # No safe inputs detected; fall back to existing candidate/backup logic.
+                    next_best, eligible = self._choose_candidate(
+                        phase, segments, inputs_with_people, roamer_stable, band_muted, pp_level, program_input,
+                        _recovery_context="fallback",
+                    )
+                    target = next_best or cfg.backup_input_id
+                    target_reason = "backup_fallback" if not next_best else "chosen_from_all"
+
+                logger.info(
+                    "Recovery rubric: program=%s safe_inputs=%s eligible=%s target=%s reason=%s",
+                    program_input, safe_inputs, eligible, target, target_reason,
+                )
+
+                can_cut_now = self._can_cut_now(now)
+
                 self._update_decision(
                     phase=phase, pp_phase=pp_phase,
                     pp_item_name=self._pp.get_current_item_name() if self._pp else None,
-                    segment_input_ids=[i for i, _ in segments], inputs_with_people=list(inputs_with_people),
+                    segment_input_ids=segment_ids, inputs_with_people=list(inputs_with_people),
                     roamer_stable=roamer_stable, band_muted=band_muted, pp_level=pp_level, program_input=program_input,
                     program_ok=False, program_bad_reason=reason, candidate=target, eligible=eligible,
-                    block_reason="recovery", cut_performed=self._run_mode == RUN_MODE_RUNNING,
+                    block_reason="recovery", cut_performed=(self._run_mode == RUN_MODE_RUNNING and can_cut_now),
+                    recovery_safe_why=safe_why, recovery_safe_inputs=safe_inputs, recovery_target_reason=target_reason,
                 )
-                if self._run_mode == RUN_MODE_RUNNING:
+                if self._run_mode == RUN_MODE_RUNNING and can_cut_now:
                     if self._atem.cut_to_input(target, cfg.transition_duration):
                         self._last_cut_time = now
                         self._last_cut_input = target
@@ -253,7 +368,8 @@ class DirectorCore:
                     target = locked_inputs[0] if locked_inputs else cfg.backup_input_id
                 else:
                     target = cfg.backup_input_id
-                if self._run_mode == RUN_MODE_RUNNING:
+                can_cut_now = self._can_cut_now(now)
+                if self._run_mode == RUN_MODE_RUNNING and can_cut_now:
                     if self._atem.cut_to_input(target, cfg.transition_duration):
                         self._last_cut_time = now
                         self._last_cut_input = target
@@ -297,6 +413,9 @@ class DirectorCore:
             self._update_decision(block_reason="rehearsal")
             logger.info("Rehearsal: would have cut to input %s (phase=%s)", candidate, phase)
             return None
+        if not self._can_cut_now(now):
+            self._update_decision(block_reason="rate_limit", cut_performed=False)
+            return None
         if self._atem.cut_to_input(candidate, cfg.transition_duration):
             self._last_cut_time = now
             self._last_cut_input = candidate
@@ -327,29 +446,53 @@ class DirectorCore:
         band_muted: Optional[bool],
         pp_level: float,
         current_program: Optional[int],
+        _recovery_context: Optional[str] = None,
     ) -> Tuple[Optional[int], List[int]]:
         """Build eligible candidates for this phase; return (best input or None, list of eligible input ids)."""
         cfg = self.config
         roles = cfg.input_roles
+        segment_ids = [i for i, _ in segments]
 
         # Phases locked to a role: always choose that role's input (e.g. Intro/BumperIn/Outro -> cg).
         locked_role = cfg.phases_locked_to_role.get(phase)
         if locked_role:
             role_inputs = roles.inputs_for_role(locked_role)
             if role_inputs:
+                logger.debug(
+                    "Recovery _choose_candidate: phase=%s locked_role=%s role_inputs=%s -> %s",
+                    phase, locked_role, role_inputs, role_inputs[0],
+                )
                 return role_inputs[0], list(role_inputs)
 
         eligible: List[int] = []
+        why_skipped: Dict[int, str] = {}
         for input_id, _ in segments:
+            if self._is_recently_bad(input_id):
+                why_skipped[input_id] = "recently_bad"
+                continue
             role = roles.role_for_input(input_id)
             if not role:
+                why_skipped[input_id] = "no_role"
                 continue
             if role == "roamer" and cfg.roamer.enabled and input_id == cfg.roamer.atem_input_id:
-                if not roamer_stable:
+                # For normal (non-recovery) cuts we require the roamer to be stable;
+                # for recovery we relax this and rely only on \"safe\" checks (non-black).
+                if not roamer_stable and not _recovery_context:
+                    why_skipped[input_id] = "roamer_unstable"
                     continue
             eligible.append(input_id)
+        if _recovery_context:
+            logger.debug(
+                "Recovery _choose_candidate: phase=%s segment_ids=%s why_skipped=%s eligible=%s",
+                phase, segment_ids, why_skipped, eligible,
+            )
         if not eligible:
-            return (cfg.backup_input_id if cfg.backup_input_id else None, [])
+            fallback = cfg.backup_input_id if cfg.backup_input_id else None
+            logger.debug(
+                "Recovery _choose_candidate: no eligible -> backup_input_id=%s",
+                fallback,
+            )
+            return (fallback, [])
         # Prefer inputs with person
         with_person = [i for i in eligible if i in inputs_with_people]
         candidates = with_person if with_person else eligible
@@ -359,13 +502,16 @@ class DirectorCore:
                 if roles.role_for_input(i) in ("sermon_hero", "sermon_ptz", "sermon_roamer", "ptz", "roamer")
             ]
             if sermon_inputs:
-                # Rotate: avoid same as current
                 for i in sermon_inputs:
                     if i != current_program:
                         return (i, eligible)
                 return (sermon_inputs[0], eligible)
-        # Default: first candidate with person, else first eligible
+        # Default: first candidate with person, else first eligible (order = segment order)
         chosen = candidates[0] if candidates else (eligible[0] if eligible else None)
+        logger.debug(
+            "Recovery _choose_candidate: with_person=%s candidates=%s chosen=%s (first in list)",
+            with_person, candidates, chosen,
+        )
         return (chosen, eligible)
 
     def run(self):

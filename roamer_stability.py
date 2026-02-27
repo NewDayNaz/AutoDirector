@@ -53,7 +53,12 @@ class RoamerStability:
         return motion
 
     def _compute_motion(self, gray: np.ndarray) -> float:
-        if self.use_laplacian:
+        # With Laplacian, \"motion\" is really \"texture\" or detail. Static color bars
+        # have very high Laplacian variance even though they are perfectly stable.
+        # To make \"stable\" mean \"not changing over time\", prefer frame-diff when
+        # previous frame is available; fall back to Laplacian only when we don't yet
+        # have a previous frame.
+        if self.use_laplacian and self._prev_frame is None:
             lap = cv2.Laplacian(gray, cv2.CV_64F)
             return float(np.var(lap))
         if self._prev_frame is None:

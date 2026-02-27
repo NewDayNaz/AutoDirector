@@ -1,9 +1,6 @@
 """
 Service phase state machine for the auto-director.
 
-States: Intro, BumperIn, Band1, Welcome, Greeting, Announce, VersePrayer, Band2,
-PrayerTime, Band3, Acoustic, BumperSermon, Sermon, BandOrDismiss, Outro.
-
 Inputs: ProPresenter (playlist item → phase from config), optional time/run-sheet,
 optional manual override. Output: current phase; invokes on_phase_changed when phase changes.
 """

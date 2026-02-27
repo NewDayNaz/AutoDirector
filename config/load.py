@@ -47,10 +47,29 @@ def _load_capture(raw: Any) -> CaptureConfig:
         return raw
     if not isinstance(raw, dict):
         return CaptureConfig()
+    # Optional mapping from multiview section index (1-based) to ATEM input id.
+    mapping_raw = (
+        raw.get("section_to_input_id")
+        or raw.get("multiview_section_to_input_id")
+        or {}
+    )
+    section_to_input_id: Dict[int, int] = {}
+    if isinstance(mapping_raw, dict):
+        for k, v in mapping_raw.items():
+            try:
+                section = int(k)
+                atem_input = int(v)
+            except (ValueError, TypeError):
+                continue
+            if atem_input > 0:
+                section_to_input_id[section] = atem_input
     return CaptureConfig(
         source=raw.get("source", 0),
         profile_path=raw.get("profile_path"),
         inset_ratio=float(raw.get("inset_ratio", 0.02)),
+        debug_frame_path=raw.get("debug_frame_path"),
+        debug_multiview_sections_path=raw.get("debug_multiview_sections_path"),
+        section_to_input_id=section_to_input_id,
     )
 
 

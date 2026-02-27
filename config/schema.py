@@ -13,21 +13,24 @@ from typing import Any, Dict, List, Optional
 
 # Phase IDs matching the plan (Intro, BumperIn, Band1, ...).
 PHASE_IDS = (
-    "Intro",
+    "Intro", 
     "BumperIn",
+    "Band",
     "Band1",
     "Welcome",
     "Greeting",
     "Announce",
-    "VersePrayer",
+    "BibleTime",
     "Band2",
     "PrayerTime",
     "Band3",
+    "Band4",
+    "Band5",
     "Acoustic",
     "BumperSermon",
     "Sermon",
     "BandOrDismiss",
-    "Outro",
+    "Outro"
 )
 
 # Input role names used in phase rules.
@@ -61,6 +64,14 @@ class CaptureConfig:
     source: int | str = 0  # Device index or file path
     profile_path: Optional[str] = None
     inset_ratio: float = 0.02
+    # Optional path to save the first captured multiview frame for debugging.
+    debug_frame_path: Optional[str] = None
+    # Optional path to save an annotated multiview image with detected sections numbered.
+    debug_multiview_sections_path: Optional[str] = None
+    # Optional mapping from multiview section index (1-based, as numbered in the
+    # annotated debug image) to ATEM input id. Sections not present in this
+    # mapping are ignored by the director.
+    section_to_input_id: Dict[int, int] = field(default_factory=dict)
 
 
 @dataclass

@@ -60,6 +60,9 @@ def main():
             source=config.capture.source,
             profile_path=config.capture.profile_path,
             inset_ratio=config.capture.inset_ratio,
+            debug_frame_path=config.capture.debug_frame_path,
+            debug_multiview_sections_path=config.capture.debug_multiview_sections_path,
+            section_to_input_id=config.capture.section_to_input_id,
         )
         detector = ATEMMultiviewDetector()
     except Exception as e:
@@ -89,6 +92,11 @@ def main():
             playlist_item_to_phase=config.playlist_item_to_phase,
         )
         pp.start()
+        # Log initial playlist → phase mapping (explicit config + any auto-assigned song phases).
+        try:
+            pp.log_playlist_mapping_snapshot()
+        except Exception:
+            logging.debug("Unable to log ProPresenter playlist mapping snapshot on startup", exc_info=True)
     except Exception as e:
         logging.warning("ProPresenter adapter unavailable: %s", e)
     ptz = None

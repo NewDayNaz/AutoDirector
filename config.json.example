@@ -6,6 +6,8 @@
   },
   "capture": {
     "source": 0,
+    "debug_frame_path": "debug_frames/multiview_first_frame.png",
+    "debug_multiview_sections_path": "debug_frames/multiview_sections.png",
     "profile_path": "multiview_profiles/default.json",
     "inset_ratio": 0.02
   },

@@ -42,6 +42,9 @@ class MultiviewIngest:
         inset_px: int = 0,
         inset_ratio: float = 0.02,
         auto_save_profile: Optional[str | Path] = None,
+        debug_frame_path: Optional[str | Path] = None,
+        debug_multiview_sections_path: Optional[str | Path] = None,
+        section_to_input_id: Optional[Dict[int, int]] = None,
     ):
         """
         Args:
@@ -61,6 +64,17 @@ class MultiviewIngest:
         self._layout: Optional[Dict[int, Tuple[int, int, int, int]]] = None
         self._frame_shape: Optional[Tuple[int, int]] = None
         self._lock = threading.Lock()
+        self._debug_frame_path = Path(debug_frame_path) if debug_frame_path else None
+        self._debug_frame_saved = False
+        self._debug_multiview_sections_path = (
+            Path(debug_multiview_sections_path) if debug_multiview_sections_path else None
+        )
+        self._debug_multiview_sections_saved = False
+        # Optional mapping from multiview section index (1-based) to ATEM input id.
+        # When provided, segments returned by get_segments() will use ATEM input ids
+        # instead of raw section indices; sections not present in the mapping are
+        # dropped.
+        self._section_to_input_id: Dict[int, int] = dict(section_to_input_id or {})
 
     def _ensure_open(self) -> bool:
         if self._cap is not None and self._cap.isOpened():
@@ -92,7 +106,51 @@ class MultiviewIngest:
             self._layout = layout
             if frame is not None:
                 self._frame_shape = (frame.shape[0], frame.shape[1])
+        if layout is not None:
+            self._maybe_save_multiview_sections_debug(frame, layout)
         return layout
+
+    def _maybe_save_multiview_sections_debug(
+        self,
+        frame: np.ndarray,
+        layout: Dict[int, Tuple[int, int, int, int]],
+    ) -> None:
+        """
+        Optionally save an annotated multiview image with detected sections numbered.
+        This is intended for one-time debugging of the layout; it only runs once.
+        """
+        if (
+            self._debug_multiview_sections_path is None
+            or self._debug_multiview_sections_saved
+            or frame is None
+            or not layout
+        ):
+            return
+        try:
+            annotated = frame.copy()
+            for input_id, (x, y, w, h) in sorted(layout.items()):
+                x2 = x + max(0, w - 1)
+                y2 = y + max(0, h - 1)
+                cv2.rectangle(annotated, (x, y), (x2, y2), (0, 0, 255), 2)
+                label = str(input_id)
+                # Place label near top-left inside the rectangle.
+                cv2.putText(
+                    annotated,
+                    label,
+                    (x + 5, y + 25),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
+            self._debug_multiview_sections_path.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(self._debug_multiview_sections_path), annotated)
+        except Exception:
+            # Debug output should never break ingestion.
+            pass
+        finally:
+            self._debug_multiview_sections_saved = True
 
     def _save_profile(self, width: int, height: int, layout: Dict[int, Tuple[int, int, int, int]]) -> None:
         try:
@@ -115,6 +173,16 @@ class MultiviewIngest:
         ok, frame = self._cap.read()
         if not ok or frame is None:
             return None
+        # Optionally save the first successfully read frame to disk so the caller
+        # can verify that the capture source is correct.
+        if self._debug_frame_path is not None and not self._debug_frame_saved:
+            try:
+                self._debug_frame_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(self._debug_frame_path), frame)
+                self._debug_frame_saved = True
+            except Exception:
+                # If debug saving fails, it should not break ingestion.
+                self._debug_frame_saved = True
         return frame
 
     def get_segments(self, frame: Optional[np.ndarray] = None) -> List[Tuple[int, np.ndarray]]:
@@ -129,12 +197,23 @@ class MultiviewIngest:
         layout = self._resolve_layout(frame)
         if not layout:
             return []
-        return segment_frame(
+        segments = segment_frame(
             frame,
             layout,
             inset_px=self.inset_px,
             inset_ratio=self.inset_ratio,
         )
+        # If no mapping is provided, treat layout keys as the final input ids.
+        if not self._section_to_input_id:
+            return segments
+        # Otherwise, remap from section index (layout/input_id) to ATEM input id.
+        remapped: List[Tuple[int, np.ndarray]] = []
+        for section_id, crop in segments:
+            atem_input = self._section_to_input_id.get(section_id)
+            if atem_input is None:
+                continue
+            remapped.append((atem_input, crop))
+        return remapped
 
     def get_layout(self, frame: Optional[np.ndarray] = None) -> Optional[Dict[int, Tuple[int, int, int, int]]]:
         """Resolve and return current layout (input_id -> (x,y,w,h)) without segmenting."""
@@ -166,10 +245,20 @@ def segments_from_capture(
     source: int | str = 0,
     profile_path: Optional[str | Path] = None,
     inset_ratio: float = 0.02,
+    debug_frame_path: Optional[str | Path] = None,
+    debug_multiview_sections_path: Optional[str | Path] = None,
+    section_to_input_id: Optional[Dict[int, int]] = None,
 ) -> List[Tuple[int, np.ndarray]]:
     """
     One-shot: open source, read one frame, resolve layout, return segments.
     Useful for testing or single-frame processing.
     """
-    with MultiviewIngest(source=source, profile_path=profile_path, inset_ratio=inset_ratio) as ingest:
+    with MultiviewIngest(
+        source=source,
+        profile_path=profile_path,
+        inset_ratio=inset_ratio,
+        debug_frame_path=debug_frame_path,
+        debug_multiview_sections_path=debug_multiview_sections_path,
+        section_to_input_id=section_to_input_id,
+    ) as ingest:
         return ingest.get_segments()
