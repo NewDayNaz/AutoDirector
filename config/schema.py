@@ -181,6 +181,41 @@ class AudioBiasConfig:
     # Require a new inferred audio mode (band/speaking/neutral) to be stable this long
     # before adopting it, to avoid rapid toggling.
     hysteresis_seconds: float = 1.5
+    # Layout keywords used to infer band vs speaking from the ProPresenter stage display layout name.
+    # Defaults match existing hardcoded behavior: layouts containing \"LYRICS\"/\"WORSHIP\"
+    # imply band; \"TEACH\"/\"PREACH\"/\"LIVE\" imply speaking.
+    band_layout_keywords: List[str] = field(default_factory=lambda: ["LYRICS", "WORSHIP"])
+    speaking_layout_keywords: List[str] = field(default_factory=lambda: ["TEACH", "PREACH", "LIVE"])
+    # Preferred input roles per inferred audio mode (used to bias candidate selection).
+    # Defaults match existing hardcoded behavior in DirectorCore._choose_candidate.
+    band_preferred_roles: List[str] = field(
+        default_factory=lambda: ["roamer", "ptz", "fixed_1", "fixed_2"]
+    )
+    speaking_preferred_roles: List[str] = field(
+        default_factory=lambda: ["sermon_hero", "sermon_ptz", "sermon_roamer", "ptz", "roamer"]
+    )
+
+
+@dataclass
+class SermonBumperConfig:
+    """
+    Configuration for detecting an embedded sermon bumper video inside the Sermon playlist item.
+    """
+    # Global on/off switch for sermon bumper detection.
+    enabled: bool = True
+    # Phase ids to use when bumper is active / when sermon is active.
+    bumper_phase_id: str = "BumperSermon"
+    sermon_phase_id: str = "Sermon"
+    # Layout keywords that imply a bumper/video layout when slide_type is not yet known.
+    # Defaults match existing behavior: stage display layouts containing \"VIDEO\" or \"BUMPER\".
+    layout_keywords: List[str] = field(default_factory=lambda: ["VIDEO", "BUMPER"])
+    # Factor applied to audio_bias.band_threshold when requiring ProPresenter audio to be
+    # \"hot enough\" to treat the current slide as an active bumper.
+    # Default 0.6 matches the prior hardcoded band_threshold * 0.6 heuristic.
+    audio_min_factor: float = 0.6
+    # Hysteresis window for bumper activation/deactivation (seconds).
+    # Default 0.6 matches the prior hardcoded hysteresis window in DirectorCore.tick.
+    hysteresis_seconds: float = 0.6
 
 
 @dataclass
@@ -222,6 +257,8 @@ class DirectorConfig:
     pacing: PacingConfig = field(default_factory=PacingConfig)
     # Optional audio-driven bias between band vs speaking dominance.
     audio_bias: AudioBiasConfig = field(default_factory=AudioBiasConfig)
+    # Optional sermon bumper detection config (embedded bumper video inside Sermon item).
+    sermon_bumper: SermonBumperConfig = field(default_factory=SermonBumperConfig)
     transition_duration: float = 0.25  # 0.25 or 0.5 seconds (fade/mix)
     backup_input_id: int = 1  # Last-resort input (e.g. CG)
     backup_timeout_seconds: float = 10.0
@@ -236,6 +273,8 @@ class DirectorConfig:
     run_sheet: Optional[RunSheetConfig] = None
     # Dwell: require "best" input to be stable this long before cutting (seconds)
     dwell_seconds: float = 0.75
+    # Minimum detector confidence threshold (0–1) for considering a detection valid.
+    detector_confidence_threshold: float = 0.5
     # Optional list of dotted paths to candidate plugins (see rules_plugins.load_candidate_plugins).
     rules_plugins: List[str] = field(default_factory=list)
     # Optional log level for root logger (e.g. INFO, DEBUG); applied at startup.

@@ -22,6 +22,7 @@ from .schema import (
     PTZConfig,
     RoamerConfig,
     RunSheetConfig,
+    SermonBumperConfig,
     X32Config,
     validate_config,
 )
@@ -187,6 +188,29 @@ def _load_audio_bias(raw: Any) -> AudioBiasConfig:
         speaking_threshold=float(raw.get("speaking_threshold", 0.1)),
         use_stage_layout=bool(raw.get("use_stage_layout", True)),
         hysteresis_seconds=float(raw.get("hysteresis_seconds", 1.5)),
+        band_layout_keywords=list(raw.get("band_layout_keywords", ["LYRICS", "WORSHIP"])),
+        speaking_layout_keywords=list(raw.get("speaking_layout_keywords", ["TEACH", "PREACH", "LIVE"])),
+        band_preferred_roles=list(
+            raw.get("band_preferred_roles", ["roamer", "ptz", "fixed_1", "fixed_2"])
+        ),
+        speaking_preferred_roles=list(
+            raw.get("speaking_preferred_roles", ["sermon_hero", "sermon_ptz", "sermon_roamer", "ptz", "roamer"])
+        ),
+    )
+
+
+def _load_sermon_bumper(raw: Any) -> SermonBumperConfig:
+    if isinstance(raw, SermonBumperConfig):
+        return raw
+    if not isinstance(raw, dict):
+        return SermonBumperConfig()
+    return SermonBumperConfig(
+        enabled=bool(raw.get("enabled", True)),
+        bumper_phase_id=str(raw.get("bumper_phase_id", "BumperSermon")),
+        sermon_phase_id=str(raw.get("sermon_phase_id", "Sermon")),
+        layout_keywords=list(raw.get("layout_keywords", ["VIDEO", "BUMPER"])),
+        audio_min_factor=float(raw.get("audio_min_factor", 0.6)),
+        hysteresis_seconds=float(raw.get("hysteresis_seconds", 0.6)),
     )
 
 
@@ -236,6 +260,7 @@ def load_config(data: Dict[str, Any]) -> DirectorConfig:
         ptz=_load_ptz(_get(data, "ptz")) or (_load_ptz(_get(data, "PTZ"))),
         pacing=_load_pacing(_get(data, "pacing", {})),
         audio_bias=_load_audio_bias(_get(data, "audio_bias", {})),
+        sermon_bumper=_load_sermon_bumper(_get(data, "sermon_bumper", {})),
         unmapped_playlist_item_fallback_phase=fallback_phase,
         transition_duration=float(_get(data, "transition_duration", 0.25)),
         backup_input_id=int(_get(data, "backup_input_id", 1)),
@@ -247,6 +272,7 @@ def load_config(data: Dict[str, Any]) -> DirectorConfig:
         loop_rate_hz=float(_get(data, "loop_rate_hz", 10.0)),
         run_sheet=_load_run_sheet(_get(data, "run_sheet")),
         dwell_seconds=float(_get(data, "dwell_seconds", 0.75)),
+        detector_confidence_threshold=float(_get(data, "detector_confidence_threshold", 0.5)),
         # rules_plugins and log_level are left to their dataclass defaults unless explicitly provided.
         rules_plugins=list(_get(data, "rules_plugins", [])),
         log_level=str(_get(data, "log_level", "INFO")),

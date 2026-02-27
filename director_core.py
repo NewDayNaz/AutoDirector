@@ -450,17 +450,25 @@ class DirectorCore:
                 pastor_muted = None
         try:
             # Sermon bumper detection: embedded bumper video at start of Sermon playlist item.
-            bumper_supported = "BumperSermon" in cfg.phases.phase_ids
+            bumper_cfg = getattr(cfg, "sermon_bumper", None)
+            bumper_enabled = bool(getattr(bumper_cfg, "enabled", True)) if bumper_cfg is not None else True
+            bumper_phase_id = getattr(bumper_cfg, "bumper_phase_id", "BumperSermon") if bumper_cfg else "BumperSermon"
+            sermon_phase_id = getattr(bumper_cfg, "sermon_phase_id", "Sermon") if bumper_cfg else "Sermon"
+            bumper_supported = bumper_enabled and bumper_phase_id in cfg.phases.phase_ids
             bumper_candidate: bool = False
             if self._pp and bumper_supported:
                 name = (pp_item_name or "").strip()
                 slide_type = (pp_slide_type or "").strip().lower() if isinstance(pp_slide_type, str) else None
                 layout_upper = stage_layout.upper() if isinstance(stage_layout, str) else ""
-                # Treat playlist items mapped to Sermon as eligible for embedded bumper.
+                # Treat playlist items mapped to Sermon (or configured sermon phase) as eligible for embedded bumper.
                 mapped_phase = cfg.playlist_item_to_phase.get(name)
-                is_sermon_item = name == "Sermon" or mapped_phase == "Sermon"
+                is_sermon_item = name == sermon_phase_id or mapped_phase == sermon_phase_id
                 if is_sermon_item and not self._sermon_bumper_finished_once:
-                    layout_videoish = ("VIDEO" in layout_upper) or ("BUMPER" in layout_upper)
+                    layout_keywords = [
+                        str(k).upper()
+                        for k in (getattr(bumper_cfg, "layout_keywords", None) or ["VIDEO", "BUMPER"])
+                    ]
+                    layout_videoish = any(k in layout_upper for k in layout_keywords)
                     # Prefer explicit video slide type from ProPresenter adapter; if we don't
                     # have it yet (slide_type is None), fall back to layout name once,
                     # before we've ever seen the bumper complete.
@@ -469,8 +477,9 @@ class DirectorCore:
                         audio_cfg = getattr(cfg, "audio_bias", None)
                         level = float(pp_level or 0.0)
                         band_threshold = float(getattr(audio_cfg, "band_threshold", 0.3)) if audio_cfg else 0.3
+                        audio_factor = float(getattr(bumper_cfg, "audio_min_factor", 0.6)) if bumper_cfg else 0.6
                         # Require ProPresenter audio to be clearly present to treat the slide as an active bumper.
-                        audio_hot = level >= max(0.0, band_threshold * 0.6)
+                        audio_hot = level >= max(0.0, band_threshold * audio_factor)
                         bumper_candidate = bool(audio_hot)
 
             # If bumper was active and we've advanced to a different slide index,
@@ -500,7 +509,7 @@ class DirectorCore:
                 if bumper_candidate != self._sermon_bumper_candidate:
                     self._sermon_bumper_candidate = bumper_candidate
                     self._sermon_bumper_candidate_since = now
-                hysteresis_sec = 0.6
+                hysteresis_sec = float(getattr(bumper_cfg, "hysteresis_seconds", 0.6)) if bumper_cfg else 0.6
                 if (
                     self._sermon_bumper_candidate is not None
                     and (now - self._sermon_bumper_candidate_since) >= hysteresis_sec
@@ -524,11 +533,11 @@ class DirectorCore:
             external_phase: Optional[str] = None
             external_reason: Optional[str] = None
             if self._sermon_bumper_active and bumper_supported:
-                external_phase = "BumperSermon"
+                external_phase = bumper_phase_id
                 external_reason = "sermon_bumper_video"
-            elif pastor_muted is False and "Sermon" in cfg.phases.phase_ids:
+            elif pastor_muted is False and sermon_phase_id in cfg.phases.phase_ids:
                 # Pastor DCA is ON/unmuted -> force Sermon phase via external override (if configured).
-                external_phase = "Sermon"
+                external_phase = sermon_phase_id
                 external_reason = "pastor_dca_unmuted"
             else:
                 external_phase = None
@@ -540,11 +549,22 @@ class DirectorCore:
 
         self._phase_machine.update(propresenter_phase=pp_phase)
         phase = self._phase_machine.current_phase
-        # Remember when we have just transitioned from BumperSermon to Sermon so we
+        # Remember when we have just transitioned from bumper_phase_id to sermon_phase_id so we
         # can immediately cut away from CG to a safe sermon camera.
-        if previous_phase == "BumperSermon" and phase == "Sermon":
+        bumper_cfg_for_transition = getattr(self.config, "sermon_bumper", None)
+        bumper_phase_for_transition = (
+            getattr(bumper_cfg_for_transition, "bumper_phase_id", "BumperSermon")
+            if bumper_cfg_for_transition
+            else "BumperSermon"
+        )
+        sermon_phase_for_transition = (
+            getattr(bumper_cfg_for_transition, "sermon_phase_id", "Sermon")
+            if bumper_cfg_for_transition
+            else "Sermon"
+        )
+        if previous_phase == bumper_phase_for_transition and phase == sermon_phase_for_transition:
             self._just_exited_bumpersermon = True
-        elif phase != "Sermon":
+        elif phase != sermon_phase_for_transition:
             self._just_exited_bumpersermon = False
 
         # 2) Reconnect ATEM (reconnect with backoff is inside atem.connect())
@@ -561,7 +581,9 @@ class DirectorCore:
         inputs_with_people: Set[int] = set()
         all_results: List[Dict] = []
         if segments and self.detector:
-            res = self.detector.process_segments(segments, confidence_threshold=0.5)
+            res = self.detector.process_segments(
+                segments, confidence_threshold=getattr(cfg, "detector_confidence_threshold", 0.5)
+            )
             inputs_with_people = set(res.get("inputs_with_people", []))
             all_results = res.get("all_results", [])
         roamer_stable = False
@@ -583,13 +605,21 @@ class DirectorCore:
             pastor_speaking = pastor_muted is False
             pp_loud_for_band = pp_level >= float(getattr(audio_cfg, "band_threshold", 0.3))
             layout_upper = stage_layout.upper() if isinstance(stage_layout, str) else ""
+            band_keywords = [
+                str(k).upper()
+                for k in (getattr(audio_cfg, "band_layout_keywords", None) or ["LYRICS", "WORSHIP"])
+            ]
+            speaking_keywords = [
+                str(k).upper()
+                for k in (getattr(audio_cfg, "speaking_layout_keywords", None) or ["TEACH", "PREACH", "LIVE"])
+            ]
             layout_band = bool(
                 getattr(audio_cfg, "use_stage_layout", True)
-                and (("LYRICS" in layout_upper) or ("WORSHIP" in layout_upper))
+                and any(k in layout_upper for k in band_keywords)
             )
             layout_speaking = bool(
                 getattr(audio_cfg, "use_stage_layout", True)
-                and (("TEACH" in layout_upper) or ("PREACH" in layout_upper) or ("LIVE" in layout_upper))
+                and any(k in layout_upper for k in speaking_keywords)
             )
             if pastor_speaking and not band_active:
                 raw_audio_mode = "speaking"
@@ -1035,10 +1065,23 @@ class DirectorCore:
         # optionally biased by inferred audio_mode (band vs speaking).
         if audio_mode and candidates:
             preferred_roles: List[str] = []
+            audio_cfg = getattr(cfg, "audio_bias", None)
             if audio_mode == "band":
-                preferred_roles = ["roamer", "ptz", "fixed_1", "fixed_2"]
+                preferred_roles = list(
+                    getattr(
+                        audio_cfg,
+                        "band_preferred_roles",
+                        ["roamer", "ptz", "fixed_1", "fixed_2"],
+                    )
+                )
             elif audio_mode == "speaking":
-                preferred_roles = ["sermon_hero", "sermon_ptz", "sermon_roamer", "ptz", "roamer"]
+                preferred_roles = list(
+                    getattr(
+                        audio_cfg,
+                        "speaking_preferred_roles",
+                        ["sermon_hero", "sermon_ptz", "sermon_roamer", "ptz", "roamer"],
+                    )
+                )
 
             if preferred_roles:
                 def role_rank(input_id: int) -> int:
