@@ -77,6 +77,7 @@ def main():
                 host=config.x32.host,
                 port=config.x32.port,
                 band_dca_index=config.x32.band_dca_index,
+                pastor_dca_index=config.x32.pastor_dca_index,
                 propresenter_channel=config.x32.propresenter_channel,
             )
             x32.start()

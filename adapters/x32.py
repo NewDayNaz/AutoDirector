@@ -78,6 +78,7 @@ class X32Adapter:
         host: str,
         port: int = 10023,
         band_dca_index: int = 1,
+        pastor_dca_index: Optional[int] = None,
         propresenter_channel: Optional[int] = None,
         listen_port: int = 10024,
         poll_interval_sec: float = 0.25,
@@ -87,12 +88,14 @@ class X32Adapter:
         self.host = host
         self.port = port
         self.band_dca_index = band_dca_index
+        self.pastor_dca_index = pastor_dca_index
         self.propresenter_channel = propresenter_channel
         self.listen_port = listen_port
         self.poll_interval_sec = poll_interval_sec
         self._sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._band_muted: Optional[bool] = None
+        self._pastor_muted: Optional[bool] = None
         self._pp_level: float = 0.0
         self._lock = threading.Lock()
         self._running = False
@@ -128,8 +131,12 @@ class X32Adapter:
                 except OSError as e:
                     logger.debug("X32 xremote: %s", e)
             try:
-                msg = _build_osc_message(f"/dca/{self.band_dca_index}/on")
-                self._sock.sendto(msg, (self.host, self.port))
+                if self.band_dca_index is not None:
+                    msg = _build_osc_message(f"/dca/{self.band_dca_index}/on")
+                    self._sock.sendto(msg, (self.host, self.port))
+                if self.pastor_dca_index is not None:
+                    msg = _build_osc_message(f"/dca/{self.pastor_dca_index}/on")
+                    self._sock.sendto(msg, (self.host, self.port))
                 if self.propresenter_channel is not None:
                     ch = self.propresenter_channel
                     msg = _build_osc_message(f"/ch/{ch:02d}/mix/fader")
@@ -144,8 +151,26 @@ class X32Adapter:
                     with self._lock:
                         self._last_response = time.monotonic()
                     if addr.startswith("/dca/") and "on" in addr:
+                        dca_index = None
+                        try:
+                            parts = addr.split("/")
+                            if len(parts) >= 3:
+                                dca_index = int(parts[2])
+                        except (ValueError, TypeError):
+                            dca_index = None
+                        muted: Optional[bool] = None
+                        if args:
+                            try:
+                                # X32: /dca/N/on -> 1 = ON (unmuted), 0 = OFF (muted)
+                                muted = not bool(int(args[0]))
+                            except (ValueError, TypeError):
+                                muted = None
                         with self._lock:
-                            self._band_muted = bool(int(args[0])) if args else None
+                            if dca_index is not None:
+                                if dca_index == self.band_dca_index:
+                                    self._band_muted = muted
+                                if self.pastor_dca_index is not None and dca_index == self.pastor_dca_index:
+                                    self._pastor_muted = muted
                     elif "/ch/" in addr and "fader" in addr:
                         with self._lock:
                             self._pp_level = max(0.0, min(1.0, float(args[0]))) if args else 0.0
@@ -171,6 +196,11 @@ class X32Adapter:
         """True if band DCA is muted, False if unmuted, None if unknown."""
         with self._lock:
             return self._band_muted
+
+    def is_pastor_muted(self) -> Optional[bool]:
+        """True if pastor DCA is muted, False if unmuted, None if unknown or not configured."""
+        with self._lock:
+            return self._pastor_muted
 
     def get_propresenter_level(self) -> float:
         """ProPresenter channel level 0.0–1.0. Returns 0.0 if not configured."""

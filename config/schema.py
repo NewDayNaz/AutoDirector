@@ -100,10 +100,11 @@ class PhaseConfig:
 
 @dataclass
 class X32Config:
-    """Behringer X32 OSC: band DCA and ProPresenter channel."""
+    """Behringer X32 OSC: band/pastor DCAs and ProPresenter channel."""
     host: str = "192.168.1.1"
     port: int = 10023
     band_dca_index: int = 1  # DCA 1 = band
+    pastor_dca_index: Optional[int] = None  # Optional DCA index for pastor mic
     propresenter_channel: Optional[int] = None  # Channel index for PP computer level
 
     @property

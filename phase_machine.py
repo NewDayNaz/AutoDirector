@@ -35,6 +35,9 @@ class PhaseMachine:
         self.on_phase_changed = on_phase_changed
         self._current_phase = self.default_phase
         self._manual_override: Optional[str] = None
+        # External override is used for non-manual signals (e.g. pastor DCA).
+        self._external_override: Optional[str] = None
+        self._external_reason: Optional[str] = None
         self._run_sheet_start: Optional[float] = None  # time.monotonic() when run started
         self._run_sheet_durations: Optional[List[float]] = None  # seconds per phase in order
 
@@ -48,6 +51,24 @@ class PhaseMachine:
 
     def get_manual_override(self) -> Optional[str]:
         return self._manual_override
+
+    def set_external_override(self, phase_id: Optional[str], reason: Optional[str] = None) -> None:
+        """
+        Set or clear external phase override (e.g. from audio/X32 or other adapters).
+        Manual override (set_manual_override) always takes precedence.
+        """
+        if phase_id is None:
+            self._external_override = None
+            self._external_reason = None
+            return
+        self._external_override = phase_id if phase_id in self.phase_ids else phase_id
+        self._external_reason = reason
+
+    def get_external_override(self) -> Optional[str]:
+        return self._external_override
+
+    def get_external_override_reason(self) -> Optional[str]:
+        return self._external_reason
 
     def set_run_sheet(self, start_time_monotonic: float, phase_durations_seconds: List[float]) -> None:
         """Optional: set run sheet for time-based phase fallback."""
@@ -63,18 +84,28 @@ class PhaseMachine:
         Returns new current phase. Fires on_phase_changed(previous, current) when phase changes.
         """
         previous = self._current_phase
+        source = "previous"
         if self._manual_override is not None:
             self._current_phase = self._manual_override
+            source = "manual_override"
+        elif self._external_override is not None and self._external_override in self.phase_ids:
+            self._current_phase = self._external_override
+            source = "external_override"
         elif propresenter_phase is not None and propresenter_phase in self.phase_ids:
             self._current_phase = propresenter_phase
+            source = "propresenter"
         elif self._run_sheet_start is not None and self._run_sheet_durations:
             phase_index = self._phase_index_from_run_sheet()
             if phase_index is not None and 0 <= phase_index < len(self.phase_ids):
                 self._current_phase = self.phase_ids[phase_index]
+                source = "run_sheet"
             # else keep previous
         # else keep previous
         if self._current_phase != previous:
-            logger.info("Phase changed: %s -> %s", previous, self._current_phase)
+            extra = ""
+            if source == "external_override" and self._external_reason:
+                extra = f" (reason={self._external_reason})"
+            logger.info("Phase changed: %s -> %s [%s]%s", previous, self._current_phase, source, extra)
             if self.on_phase_changed:
                 try:
                     self.on_phase_changed(previous, self._current_phase)

@@ -192,6 +192,29 @@ class DirectorCore:
         pp_phase = self._pp.get_current_phase() if self._pp else None
         if self._pp:
             self._pp.poll()
+
+        # Optional: treat pastor DCA unmute as Sermon phase override.
+        pastor_muted: Optional[bool] = None
+        if self._x32 and hasattr(self._x32, "is_pastor_muted"):
+            try:
+                pastor_muted = self._x32.is_pastor_muted()
+            except Exception:
+                pastor_muted = None
+        try:
+            # Manual override remains highest precedence; external override is advisory.
+            if pastor_muted is False:
+                # Pastor DCA is ON/unmuted -> force Sermon phase via external override (if configured).
+                if "Sermon" in cfg.phases.phase_ids:
+                    self._phase_machine.set_external_override("Sermon", reason="pastor_dca_unmuted")  # type: ignore[attr-defined]
+            elif pastor_muted is True:
+                # Pastor DCA muted -> clear Sermon external override (if we set it previously).
+                get_ext = getattr(self._phase_machine, "get_external_override", None)
+                if callable(get_ext) and self._phase_machine.get_external_override() == "Sermon":  # type: ignore[attr-defined]
+                    self._phase_machine.set_external_override(None, reason=None)  # type: ignore[attr-defined]
+        except AttributeError:
+            # Older PhaseMachine without external override support.
+            pass
+
         self._phase_machine.update(propresenter_phase=pp_phase)
         phase = self._phase_machine.current_phase
 

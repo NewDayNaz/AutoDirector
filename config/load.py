@@ -106,10 +106,16 @@ def _load_x32(raw: Any) -> Optional[X32Config]:
         return raw
     if not isinstance(raw, dict):
         return None
+    pastor_dca_index = raw.get("pastor_dca_index")
+    try:
+        pastor_dca_index = int(pastor_dca_index) if pastor_dca_index is not None else None
+    except (ValueError, TypeError):
+        pastor_dca_index = None
     return X32Config(
         host=raw.get("host", "192.168.1.1"),
         port=int(raw.get("port", 10023)),
         band_dca_index=int(raw.get("band_dca_index", 1)),
+        pastor_dca_index=pastor_dca_index,
         propresenter_channel=raw.get("propresenter_channel"),
     )
 
