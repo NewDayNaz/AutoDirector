@@ -63,6 +63,11 @@ class CaptureConfig:
     """Multiview capture source and layout."""
     source: int | str = 0  # Device index or file path
     profile_path: Optional[str] = None
+    # Optional requested capture resolution. When set, MultiviewIngest will
+    # attempt to configure the capture device to this width/height via
+    # cv2.CAP_PROP_FRAME_WIDTH/HEIGHT. Drivers may clamp or ignore these.
+    width: Optional[int] = None
+    height: Optional[int] = None
     inset_ratio: float = 0.02
     # Optional path to save the first captured multiview frame for debugging.
     debug_frame_path: Optional[str] = None

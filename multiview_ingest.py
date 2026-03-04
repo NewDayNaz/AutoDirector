@@ -39,6 +39,8 @@ class MultiviewIngest:
         self,
         source: int | str = 0,
         profile_path: Optional[str | Path] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
         inset_px: int = 0,
         inset_ratio: float = 0.02,
         auto_save_profile: Optional[str | Path] = None,
@@ -50,12 +52,17 @@ class MultiviewIngest:
         Args:
             source: cv2.VideoCapture source (device index or file path).
             profile_path: Optional path to JSON profile (revamp-style). If set and file exists, layout is loaded from it.
+            width/height: Optional requested capture resolution. When set, we
+                call CAP_PROP_FRAME_WIDTH/HEIGHT on the capture device. Drivers
+                may clamp or ignore these values.
             inset_px: Pixel inset per cell to reduce borders/labels.
             inset_ratio: Fraction of cell size to inset (used if inset_px is 0 and ratio > 0).
             auto_save_profile: If set, save auto-detected layout to this path for next run.
         """
         self.source = source
         self.profile_path = Path(profile_path) if profile_path else None
+        self.width: Optional[int] = width
+        self.height: Optional[int] = height
         self.inset_px = inset_px
         self.inset_ratio = inset_ratio
         self.auto_save_profile = Path(auto_save_profile) if auto_save_profile else None
@@ -82,6 +89,17 @@ class MultiviewIngest:
         self._cap = cv2.VideoCapture(self.source)
         if not self._cap.isOpened():
             return False
+        # If requested, try to configure capture resolution. This is best-effort:
+        # many drivers will clamp or ignore these, but when supported it ensures
+        # we see the true 16:9 multiview instead of a low-res default.
+        try:
+            if self.width and self.width > 0:
+                self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(self.width))
+            if self.height and self.height > 0:
+                self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(self.height))
+        except Exception:
+            # Never fail ingestion just because resolution hints are unsupported.
+            pass
         return True
 
     def _resolve_layout(self, frame: np.ndarray) -> Optional[Dict[int, Tuple[int, int, int, int]]]:
@@ -165,6 +183,22 @@ class MultiviewIngest:
                 json.dump(data, f, indent=2)
         except Exception:
             pass
+
+    def seek_to_time(self, t_sec: float) -> bool:
+        """
+        Seek to a position in the stream (seconds). Only supported for file sources.
+        Returns True if seek was attempted and succeeded (or source is live and no-op).
+        """
+        if self._cap is None or not self._cap.isOpened():
+            return False
+        # Only file sources support seek; device indices do not.
+        if isinstance(self.source, (int, float)):
+            return False
+        try:
+            self._cap.set(cv2.CAP_PROP_POS_MSEC, t_sec * 1000.0)
+            return True
+        except Exception:
+            return False
 
     def read_frame(self) -> Optional[np.ndarray]:
         """Read one frame from capture. Returns BGR frame or None."""

@@ -77,6 +77,12 @@ class PhaseMachine:
     def get_external_override_reason(self) -> Optional[str]:
         return self._external_reason
 
+    def set_current_phase(self, phase_id: str) -> None:
+        """Set current phase directly (for replay mode). phase_id must be in phase_ids."""
+        if phase_id in self.phase_ids:
+            self._current_phase = phase_id
+            self._last_source = "replay"
+
     def set_run_sheet(self, start_time_monotonic: float, phase_durations_seconds: List[float]) -> None:
         """Optional: set run sheet for time-based phase fallback."""
         self._run_sheet_start = start_time_monotonic

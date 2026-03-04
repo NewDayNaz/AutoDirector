@@ -5,8 +5,18 @@ Entrypoint to run the Church Auto-Director.
 Loads config, creates MultiviewIngest, detector, ATEM control, adapters (X32, ProPresenter, PTZ),
 phase machine, and director core. Runs the director loop; optionally start web server with --web.
 
+Record/replay (listen/record mode):
+  --record [OUTPUT_JSON]  Capture state (phase, ProPresenter, X32, detector results) at each tick
+                          (or --record-interval) and write to JSON. Sync the run with OBS recording
+                          of multiview + comms so you get a state file aligned with your video.
+  --replay STATE_JSON VIDEO_FILE  Run the director from the state file, synced with the multiview
+                          video. No live ATEM/ProPresenter/X32; use this to tweak director behavior
+                          and see cuts/decisions against the same video.
+
 Usage:
   python run_director.py [--config config.json] [--web] [--web-port 8000]
+  python run_director.py --record [recordings/state.json]
+  python run_director.py --replay recordings/state.json path/to/multiview.mp4
 """
 
 from __future__ import annotations
@@ -28,6 +38,84 @@ from config.schema import DirectorConfig, validate_config
 from director_core import DirectorCore, RUN_MODE_RUNNING, RUN_MODE_STOPPED
 from atem_control import ATEMController, ATEMControllerStub
 from phase_machine import PhaseMachine
+from state_capture import StateRecorder, load_state_recording, get_state_at_t
+from replay_adapters import ReplayProPresenterAdapter, ReplayX32Adapter, ReplayDetector, ReplayATEMStub
+
+
+def _run_replay_mode(config: DirectorConfig, state_path: Path, video_path: Path) -> None:
+    """Run director in replay mode: state from state_path, video from video_path; no ATEM control."""
+    import time as _time
+    metadata, frames = load_state_recording(state_path)
+    duration_sec = metadata.get("duration_sec", 0.0) or (frames[-1]["t"] if frames else 0.0)
+    loop_rate_hz = metadata.get("loop_rate_hz", config.loop_rate_hz)
+    interval = 1.0 / max(1.0, loop_rate_hz)
+    logging.info(
+        "Replay: state=%s video=%s duration=%.1fs frames=%s rate=%.1f Hz",
+        state_path,
+        video_path,
+        duration_sec,
+        len(frames),
+        loop_rate_hz,
+    )
+
+    # Replay clock (elapsed seconds).
+    replay_t: list = [0.0]
+
+    def get_t() -> float:
+        return replay_t[0]
+
+    # Ingest from video file (same layout/capture config as live).
+    from multiview_ingest import MultiviewIngest
+
+    ingest = MultiviewIngest(
+        source=str(video_path),
+        profile_path=config.capture.profile_path,
+        width=getattr(config.capture, "width", None),
+        height=getattr(config.capture, "height", None),
+        inset_ratio=config.capture.inset_ratio,
+        debug_frame_path=None,
+        debug_multiview_sections_path=None,
+        section_to_input_id=config.capture.section_to_input_id,
+    )
+    detector = ReplayDetector(frames, get_t)
+    phase_machine = PhaseMachine(
+        phase_ids=config.phases.phase_ids,
+        default_phase=config.phases.phase_ids[0] if config.phases.phase_ids else "Intro",
+    )
+    atem = ReplayATEMStub(frames, get_t)
+    pp = ReplayProPresenterAdapter(
+        frames,
+        get_t,
+        playlist_item_to_phase=config.playlist_item_to_phase,
+        unmapped_fallback_phase=getattr(config, "unmapped_playlist_item_fallback_phase", None),
+    )
+    x32 = ReplayX32Adapter(frames, get_t) if config.x32 else None
+
+    director = DirectorCore(
+        config=config,
+        ingest=ingest,
+        detector=detector,
+        atem_controller=atem,
+        phase_machine=phase_machine,
+        x32_adapter=x32,
+        propresenter_adapter=pp,
+        ptz_adapter=None,
+    )
+    director.set_run_mode(RUN_MODE_RUNNING)
+
+    try:
+        while replay_t[0] <= duration_sec + interval:
+            state = get_state_at_t(frames, replay_t[0])
+            director.set_replay_phase_override(state.get("phase"))
+            ingest.seek_to_time(replay_t[0])
+            director.tick()
+            replay_t[0] += interval
+            _time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        ingest.release()
+    logging.info("Replay finished at t=%.1fs", replay_t[0])
 
 
 def main():
@@ -35,6 +123,27 @@ def main():
     parser.add_argument("--config", "-c", default="config.json", help="Path to config JSON")
     parser.add_argument("--web", action="store_true", help="Start web API for control/debug")
     parser.add_argument("--web-port", type=int, default=8000, help="Web server port")
+    parser.add_argument(
+        "--record",
+        metavar="OUTPUT_JSON",
+        nargs="?",
+        const="",
+        default=None,
+        help="Record state to OUTPUT_JSON (default: recordings/state_<timestamp>.json). Run with live sources; state is sampled at loop_rate_hz.",
+    )
+    parser.add_argument(
+        "--record-interval",
+        type=float,
+        default=None,
+        help="Seconds between recorded state frames (default: 1/loop_rate_hz).",
+    )
+    parser.add_argument(
+        "--replay",
+        nargs=2,
+        metavar=("STATE_JSON", "VIDEO_FILE"),
+        default=None,
+        help="Replay: run director from STATE_JSON synced with VIDEO_FILE (multiview). No ATEM control.",
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -60,6 +169,19 @@ def main():
             logging.error("  - %s", err)
         sys.exit(1)
 
+    # Replay mode: run director from state file + multiview video (no live ATEM/PP/X32).
+    if args.replay is not None:
+        state_path = Path(args.replay[0])
+        video_path = Path(args.replay[1])
+        if not state_path.exists():
+            logging.error("Replay state file not found: %s", state_path)
+            sys.exit(1)
+        if not video_path.exists():
+            logging.error("Replay video file not found: %s", video_path)
+            sys.exit(1)
+        _run_replay_mode(config, state_path, video_path)
+        return
+
     # Ingest and detector (optional: if capture source not available, director still runs with no CV)
     ingest = None
     detector = None
@@ -69,6 +191,8 @@ def main():
         ingest = MultiviewIngest(
             source=config.capture.source,
             profile_path=config.capture.profile_path,
+            width=getattr(config.capture, "width", None),
+            height=getattr(config.capture, "height", None),
             inset_ratio=config.capture.inset_ratio,
             debug_frame_path=config.capture.debug_frame_path,
             debug_multiview_sections_path=config.capture.debug_multiview_sections_path,
@@ -152,6 +276,29 @@ def main():
         ptz_adapter=ptz,
     )
 
+    # Record mode: capture state each tick (or at record_interval) and write on exit.
+    recorder = None
+    if args.record is not None:
+        out_path = args.record
+        if out_path == "":
+            from datetime import datetime
+            _dir = _ATEM_ROOT / "recordings"
+            _dir.mkdir(parents=True, exist_ok=True)
+            out_path = _dir / f"state_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        else:
+            out_path = Path(out_path)
+        record_interval = args.record_interval
+        if record_interval is None:
+            record_interval = 1.0 / max(1.0, config.loop_rate_hz)
+        recorder = StateRecorder(
+            output_path=out_path,
+            record_interval_sec=record_interval,
+            loop_rate_hz=config.loop_rate_hz,
+        )
+        director.set_state_capture_callback(recorder.on_tick_state)
+        recorder.start()
+        logging.info("Recording state to %s (interval=%.3fs)", out_path, record_interval)
+
     if args.web:
         try:
             import threading
@@ -167,6 +314,11 @@ def main():
                     time.sleep(interval)
 
             def shutdown(_signum=None, _frame=None):
+                if recorder is not None:
+                    try:
+                        recorder.write()
+                    except Exception:
+                        pass
                 os._exit(0)
 
             # Windows: SIGINT in a multithreaded app often doesn't exit; use console Ctrl handler
@@ -207,6 +359,9 @@ def main():
             time.sleep(interval)
     except KeyboardInterrupt:
         director.set_run_mode(RUN_MODE_STOPPED)
+    finally:
+        if recorder is not None:
+            recorder.write()
     if x32:
         x32.stop()
     if pp:

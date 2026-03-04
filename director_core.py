@@ -130,6 +130,10 @@ class DirectorCore:
         self._just_exited_bumpersermon: bool = False
         # Wire phase change -> PTZ recall (except in rehearsal)
         self._phase_machine.on_phase_changed = self._on_phase_changed
+        # Optional: record/replay state capture (called each tick with state snapshot).
+        self._state_capture_callback: Optional[Any] = None
+        # Replay mode: when set, use this phase instead of updating from ProPresenter/X32.
+        self._replay_phase_override: Optional[str] = None
 
     def _update_decision(self, **kwargs: Any) -> None:
         """Merge kwargs into _decision_state for UI (only scalar/list/dict values)."""
@@ -183,6 +187,14 @@ class DirectorCore:
         out = dict(self._metrics)
         out["loop_rate_hz"] = self.config.loop_rate_hz
         return out
+
+    def set_state_capture_callback(self, callback: Optional[Any]) -> None:
+        """Set a callback invoked each tick with a state snapshot for record/replay. Signature: (state: dict) -> None."""
+        self._state_capture_callback = callback
+
+    def set_replay_phase_override(self, phase_id: Optional[str]) -> None:
+        """In replay mode, use this phase for the next tick instead of updating from adapters."""
+        self._replay_phase_override = phase_id
 
     def get_decision_log(self) -> List[Dict[str, Any]]:
         """
@@ -441,114 +453,120 @@ class DirectorCore:
         )
         pp_level = self._x32.get_propresenter_level() if self._x32 else 0.0
 
-        # Optional: treat pastor DCA unmute and sermon bumper as phase overrides.
         pastor_muted: Optional[bool] = None
         if self._x32 and hasattr(self._x32, "is_pastor_muted"):
             try:
                 pastor_muted = self._x32.is_pastor_muted()
             except Exception:
                 pastor_muted = None
-        try:
-            # Sermon bumper detection: embedded bumper video at start of Sermon playlist item.
-            bumper_cfg = getattr(cfg, "sermon_bumper", None)
-            bumper_enabled = bool(getattr(bumper_cfg, "enabled", True)) if bumper_cfg is not None else True
-            bumper_phase_id = getattr(bumper_cfg, "bumper_phase_id", "BumperSermon") if bumper_cfg else "BumperSermon"
-            sermon_phase_id = getattr(bumper_cfg, "sermon_phase_id", "Sermon") if bumper_cfg else "Sermon"
-            bumper_supported = bumper_enabled and bumper_phase_id in cfg.phases.phase_ids
-            bumper_candidate: bool = False
-            if self._pp and bumper_supported:
-                name = (pp_item_name or "").strip()
-                slide_type = (pp_slide_type or "").strip().lower() if isinstance(pp_slide_type, str) else None
-                layout_upper = stage_layout.upper() if isinstance(stage_layout, str) else ""
-                # Treat playlist items mapped to Sermon (or configured sermon phase) as eligible for embedded bumper.
-                mapped_phase = cfg.playlist_item_to_phase.get(name)
-                is_sermon_item = name == sermon_phase_id or mapped_phase == sermon_phase_id
-                if is_sermon_item and not self._sermon_bumper_finished_once:
-                    layout_keywords = [
-                        str(k).upper()
-                        for k in (getattr(bumper_cfg, "layout_keywords", None) or ["VIDEO", "BUMPER"])
-                    ]
-                    layout_videoish = any(k in layout_upper for k in layout_keywords)
-                    # Prefer explicit video slide type from ProPresenter adapter; if we don't
-                    # have it yet (slide_type is None), fall back to layout name once,
-                    # before we've ever seen the bumper complete.
-                    is_video_like = bool(slide_type == "video" or (slide_type is None and layout_videoish))
-                    if is_video_like:
-                        audio_cfg = getattr(cfg, "audio_bias", None)
-                        level = float(pp_level or 0.0)
-                        band_threshold = float(getattr(audio_cfg, "band_threshold", 0.3)) if audio_cfg else 0.3
-                        audio_factor = float(getattr(bumper_cfg, "audio_min_factor", 0.6)) if bumper_cfg else 0.6
-                        # Require ProPresenter audio to be clearly present to treat the slide as an active bumper.
-                        audio_hot = level >= max(0.0, band_threshold * audio_factor)
-                        bumper_candidate = bool(audio_hot)
 
-            # If bumper was active and we've advanced to a different slide index,
-            # treat the bumper as finished immediately, regardless of audio/layout.
-            if (
-                self._sermon_bumper_active
-                and self._sermon_bumper_slide_index is not None
-                and pp_slide_index is not None
-                and pp_slide_index != self._sermon_bumper_slide_index
-            ):
-                if self._sermon_bumper_active:
-                    self._sermon_bumper_active = False
-                    self._sermon_bumper_candidate = None
-                    self._sermon_bumper_finished_once = True
-                    self._sermon_bumper_slide_index = None
-                    logger.info(
-                        "Sermon bumper active -> False (slide index advanced: %s -> %s)",
-                        self._sermon_bumper_slide_index,
-                        pp_slide_index,
-                    )
-                bumper_candidate = False
+        # Replay mode: use recorded phase for this tick and skip phase machine update.
+        if self._replay_phase_override is not None:
+            phase = self._replay_phase_override
+            self._phase_machine.set_current_phase(phase)
+            self._replay_phase_override = None
+        else:
+            # Optional: treat pastor DCA unmute and sermon bumper as phase overrides.
+            try:
+                # Sermon bumper detection: embedded bumper video at start of Sermon playlist item.
+                bumper_cfg = getattr(cfg, "sermon_bumper", None)
+                bumper_enabled = bool(getattr(bumper_cfg, "enabled", True)) if bumper_cfg is not None else True
+                bumper_phase_id = getattr(bumper_cfg, "bumper_phase_id", "BumperSermon") if bumper_cfg else "BumperSermon"
+                sermon_phase_id = getattr(bumper_cfg, "sermon_phase_id", "Sermon") if bumper_cfg else "Sermon"
+                bumper_supported = bumper_enabled and bumper_phase_id in cfg.phases.phase_ids
+                bumper_candidate: bool = False
+                if self._pp and bumper_supported:
+                    name = (pp_item_name or "").strip()
+                    slide_type = (pp_slide_type or "").strip().lower() if isinstance(pp_slide_type, str) else None
+                    layout_upper = stage_layout.upper() if isinstance(stage_layout, str) else ""
+                    # Treat playlist items mapped to Sermon (or configured sermon phase) as eligible for embedded bumper.
+                    mapped_phase = cfg.playlist_item_to_phase.get(name)
+                    is_sermon_item = name == sermon_phase_id or mapped_phase == sermon_phase_id
+                    if is_sermon_item and not self._sermon_bumper_finished_once:
+                        layout_keywords = [
+                            str(k).upper()
+                            for k in (getattr(bumper_cfg, "layout_keywords", None) or ["VIDEO", "BUMPER"])
+                        ]
+                        layout_videoish = any(k in layout_upper for k in layout_keywords)
+                        # Prefer explicit video slide type from ProPresenter adapter; if we don't
+                        # have it yet (slide_type is None), fall back to layout name once,
+                        # before we've ever seen the bumper complete.
+                        is_video_like = bool(slide_type == "video" or (slide_type is None and layout_videoish))
+                        if is_video_like:
+                            audio_cfg = getattr(cfg, "audio_bias", None)
+                            level = float(pp_level or 0.0)
+                            band_threshold = float(getattr(audio_cfg, "band_threshold", 0.3)) if audio_cfg else 0.3
+                            audio_factor = float(getattr(bumper_cfg, "audio_min_factor", 0.6)) if bumper_cfg else 0.6
+                            # Require ProPresenter audio to be clearly present to treat the slide as an active bumper.
+                            audio_hot = level >= max(0.0, band_threshold * audio_factor)
+                            bumper_candidate = bool(audio_hot)
 
-            # Hysteresis for sermon bumper activation to avoid rapid toggling.
-            if bumper_candidate == self._sermon_bumper_active:
-                self._sermon_bumper_candidate = None
-            else:
-                if bumper_candidate != self._sermon_bumper_candidate:
-                    self._sermon_bumper_candidate = bumper_candidate
-                    self._sermon_bumper_candidate_since = now
-                hysteresis_sec = float(getattr(bumper_cfg, "hysteresis_seconds", 0.6)) if bumper_cfg else 0.6
+                # If bumper was active and we've advanced to a different slide index,
+                # treat the bumper as finished immediately, regardless of audio/layout.
                 if (
-                    self._sermon_bumper_candidate is not None
-                    and (now - self._sermon_bumper_candidate_since) >= hysteresis_sec
+                    self._sermon_bumper_active
+                    and self._sermon_bumper_slide_index is not None
+                    and pp_slide_index is not None
+                    and pp_slide_index != self._sermon_bumper_slide_index
                 ):
-                    self._sermon_bumper_active = self._sermon_bumper_candidate
-                    self._sermon_bumper_candidate = None
                     if self._sermon_bumper_active:
-                        self._sermon_bumper_slide_index = pp_slide_index
-                    else:
+                        self._sermon_bumper_active = False
+                        self._sermon_bumper_candidate = None
+                        self._sermon_bumper_finished_once = True
                         self._sermon_bumper_slide_index = None
-                    logger.info(
-                        "Sermon bumper active -> %s (item=%r slide_type=%r layout=%r level=%.3f)",
-                        self._sermon_bumper_active,
-                        pp_item_name,
-                        pp_slide_type,
-                        stage_layout,
-                        pp_level,
-                    )
+                        logger.info(
+                            "Sermon bumper active -> False (slide index advanced: %s -> %s)",
+                            self._sermon_bumper_slide_index,
+                            pp_slide_index,
+                        )
+                    bumper_candidate = False
 
-            # Manual override remains highest precedence; external override is advisory.
-            external_phase: Optional[str] = None
-            external_reason: Optional[str] = None
-            if self._sermon_bumper_active and bumper_supported:
-                external_phase = bumper_phase_id
-                external_reason = "sermon_bumper_video"
-            elif pastor_muted is False and sermon_phase_id in cfg.phases.phase_ids:
-                # Pastor DCA is ON/unmuted -> force Sermon phase via external override (if configured).
-                external_phase = sermon_phase_id
-                external_reason = "pastor_dca_unmuted"
-            else:
+                # Hysteresis for sermon bumper activation to avoid rapid toggling.
+                if bumper_candidate == self._sermon_bumper_active:
+                    self._sermon_bumper_candidate = None
+                else:
+                    if bumper_candidate != self._sermon_bumper_candidate:
+                        self._sermon_bumper_candidate = bumper_candidate
+                        self._sermon_bumper_candidate_since = now
+                    hysteresis_sec = float(getattr(bumper_cfg, "hysteresis_seconds", 0.6)) if bumper_cfg else 0.6
+                    if (
+                        self._sermon_bumper_candidate is not None
+                        and (now - self._sermon_bumper_candidate_since) >= hysteresis_sec
+                    ):
+                        self._sermon_bumper_active = self._sermon_bumper_candidate
+                        self._sermon_bumper_candidate = None
+                        if self._sermon_bumper_active:
+                            self._sermon_bumper_slide_index = pp_slide_index
+                        else:
+                            self._sermon_bumper_slide_index = None
+                        logger.info(
+                            "Sermon bumper active -> %s (item=%r slide_type=%r layout=%r level=%.3f)",
+                            self._sermon_bumper_active,
+                            pp_item_name,
+                            pp_slide_type,
+                            stage_layout,
+                            pp_level,
+                        )
+
+                # Manual override remains highest precedence; external override is advisory.
                 external_phase = None
                 external_reason = None
-            self._phase_machine.set_external_override(external_phase, reason=external_reason)  # type: ignore[attr-defined]
-        except AttributeError:
-            # Older PhaseMachine without external override support.
-            pass
+                if self._sermon_bumper_active and bumper_supported:
+                    external_phase = bumper_phase_id
+                    external_reason = "sermon_bumper_video"
+                elif pastor_muted is False and sermon_phase_id in cfg.phases.phase_ids:
+                    external_phase = sermon_phase_id
+                    external_reason = "pastor_dca_unmuted"
+                else:
+                    external_phase = None
+                    external_reason = None
+                self._phase_machine.set_external_override(external_phase, reason=external_reason)  # type: ignore[attr-defined]
+            except AttributeError:
+                pass
 
-        self._phase_machine.update(propresenter_phase=pp_phase)
-        phase = self._phase_machine.current_phase
+            self._phase_machine.update(propresenter_phase=pp_phase)
+            phase = self._phase_machine.current_phase
+
         # Remember when we have just transitioned from bumper_phase_id to sermon_phase_id so we
         # can immediately cut away from CG to a safe sermon camera.
         bumper_cfg_for_transition = getattr(self.config, "sermon_bumper", None)
@@ -596,6 +614,34 @@ class DirectorCore:
         band_muted = self._x32.is_band_muted() if self._x32 else None
         program_input = self._atem.get_program_input()
         roles = cfg.input_roles
+
+        # State capture for record/replay: snapshot of inputs used this tick.
+        if self._state_capture_callback:
+            try:
+                self._state_capture_callback({
+                    "phase": phase,
+                    "pp_phase": pp_phase,
+                    "pp_item_name": pp_item_name,
+                    "pp_slide_type": pp_slide_type,
+                    "pp_slide_index": pp_slide_index,
+                    "stage_layout": stage_layout,
+                    "pp_level": pp_level,
+                    "pastor_muted": pastor_muted,
+                    "band_muted": band_muted,
+                    "program_input": program_input,
+                    "inputs_with_people": inputs_with_people,
+                    "roamer_stable": roamer_stable,
+                    "sermon_bumper_active": self._sermon_bumper_active,
+                    "external_phase_override": getattr(
+                        self._phase_machine, "get_external_override", lambda: None
+                    )(),
+                    "external_phase_reason": getattr(
+                        self._phase_machine, "get_external_override_reason", lambda: None
+                    )(),
+                })
+            except Exception as e:
+                logger.debug("State capture callback failed: %s", e)
+
         # Audio-mode inference (band / speaking / neutral) with basic hysteresis.
         raw_audio_mode: Optional[str] = None
         audio_mode: Optional[str] = None

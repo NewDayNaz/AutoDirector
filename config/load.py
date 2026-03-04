@@ -49,6 +49,19 @@ def _load_capture(raw: Any) -> CaptureConfig:
         return raw
     if not isinstance(raw, dict):
         return CaptureConfig()
+    # Optional explicit capture resolution.
+    width: Optional[int] = None
+    height: Optional[int] = None
+    try:
+        if "width" in raw and raw["width"] is not None:
+            width = int(raw["width"])
+    except (TypeError, ValueError):
+        width = None
+    try:
+        if "height" in raw and raw["height"] is not None:
+            height = int(raw["height"])
+    except (TypeError, ValueError):
+        height = None
     # Optional mapping from multiview section index (1-based) to ATEM input id.
     mapping_raw = (
         raw.get("section_to_input_id")
@@ -68,6 +81,8 @@ def _load_capture(raw: Any) -> CaptureConfig:
     return CaptureConfig(
         source=raw.get("source", 0),
         profile_path=raw.get("profile_path"),
+        width=width,
+        height=height,
         inset_ratio=float(raw.get("inset_ratio", 0.02)),
         debug_frame_path=raw.get("debug_frame_path"),
         debug_multiview_sections_path=raw.get("debug_multiview_sections_path"),
